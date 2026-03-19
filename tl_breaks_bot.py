@@ -12,6 +12,7 @@
 #  [5] CSV Logger               → يسجل كل صفقة مع إحصائيات
 #  [6] Daily Summary            → ملخص يومي على Telegram
 #  [7] Railway Ready            → لا ملفات محلية حساسة
+#  [8] Session Filter           → 07:00 – 17:00 UTC فقط
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
@@ -85,7 +86,6 @@ MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',    '5'))
 ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
 # ── Files ──
-# Railway: يُفضَّل /tmp لأن /app قد يكون read-only
 _BASE_DIR   = os.getenv('DATA_DIR', '/tmp')
 DB_FILE     = os.path.join(_BASE_DIR, 'tl_breaks_bot.db')
 TRADES_CSV  = os.path.join(_BASE_DIR, 'trades_log.csv')
@@ -181,7 +181,6 @@ def db_consec_losses(pair):
             return count
 
 def db_get_pending(pair):
-    """يُرجع آخر صفقة PENDING للزوج (entry, sl, tp, atr, size, spread)"""
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
             row = conn.execute(
@@ -203,7 +202,6 @@ def csv_init():
 
 def csv_log_trade(pair, direction, entry, sl, tp, exit_price,
                   atr, size, spread=0.0, bars_held=0, note=''):
-    """يحسب النتيجة ويكتبها في CSV + يُرسل إشعار Telegram."""
     try:
         sl_dist = abs(entry - sl)
         pnl_pts = (exit_price - entry) if direction == 'BUY' else (entry - exit_price)
@@ -259,7 +257,6 @@ def csv_log_trade(pair, direction, entry, sl, tp, exit_price,
         return 'ERROR'
 
 def csv_summary(period='daily'):
-    """ملخص إحصائي من CSV — يُرسل لـ Telegram."""
     if not Path(TRADES_CSV).exists():
         return
     try:
@@ -268,7 +265,6 @@ def csv_summary(period='daily'):
             log('  CSV فارغ — لا ملخص')
             return
 
-        # فلتر حسب الفترة
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         if period == 'daily':
             df = df[df['date'] == today]
@@ -298,7 +294,6 @@ def csv_summary(period='daily'):
         gross_los = abs(df[df['pnl_usd'] < 0]['pnl_usd'].sum())
         pf        = round(gross_win / gross_los, 2) if gross_los > 0 else 0.0
 
-        # max consecutive losses
         mc = cur = 0
         for r in df['result']:
             if r == 'LOSS': cur += 1; mc = max(mc, cur)
@@ -418,7 +413,6 @@ def get_open_positions():
     return []
 
 def get_instrument_meta(epic):
-    """Cache 5 دقائق. Returns (bid,ask,spread,cs,min_sz,max_sz)"""
     now    = time.time()
     cached = _meta_cache.get(epic)
     if cached and (now - cached['ts']) < 300:
@@ -560,7 +554,6 @@ def tl_value(anchor_idx, anchor_val, slope, goes_up, cur_idx):
 # [1] POSITION SIZING
 # ═══════════════════════════════════════════════════════
 def calc_position_size(risk_usd, sl_dist, contract_size, min_size, max_size):
-    """size = risk_usd / (sl_dist × contractSize)"""
     if sl_dist <= 0 or contract_size <= 0:
         return min_size
     size = round(risk_usd / (sl_dist * contract_size), 2)
@@ -614,7 +607,6 @@ def check_signal(pair_name, config):
     if bid <= 0 or ask <= 0:
         return None
 
-    # [4] Spread guard
     spread_ratio = spread / last_atr
     if spread_ratio > MAX_SPREAD_ATR_RATIO:
         log(f'  {pair_name}: spread {spread_ratio:.1%} > {MAX_SPREAD_ATR_RATIO:.1%} — skip')
@@ -726,18 +718,12 @@ def _swing_sl(df_c, direction, lookback):
             else round(float(recent['high'].max()), 5))
 
 def manage_open_positions(positions):
-    """
-    [5] يكشف الصفقات المغلقة ويسجلها في CSV.
-    [2] Break-even عند BE_TRIGGER_R.
-    [3] Trailing Stop (ATR أو Structure).
-    """
     open_deal_ids = {
         pos['position']['dealId']
         for pos in positions
         if pos.get('position', {}).get('dealId')
     }
 
-    # ── كشف الصفقات المغلقة وتسجيلها ──────────────
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
             pending = conn.execute(
@@ -747,26 +733,21 @@ def manage_open_positions(positions):
 
     for row in pending:
         key, pair, direction, entry, sl, tp, atr, size, spread = row
-        # ابحث عن deal_id المرتبط بهذا الزوج في الصفقات المفتوحة
         still_open = any(
             pos.get('market', {}).get('epic', '') == PAIRS.get(pair, {}).get('epic', '')
             for pos in positions
         )
         if not still_open:
-            # الصفقة أُغلقت — احسب الخروج من السعر الحالي
             epic = PAIRS.get(pair, {}).get('epic', pair)
             bid, ask, _, _, _, _ = get_instrument_meta(epic)
             exit_price = bid if direction == 'BUY' else ask
-
             if exit_price > 0:
-                note = 'auto-detected close'
                 result = csv_log_trade(
                     pair, direction, entry, sl, tp, exit_price,
-                    atr, size, spread=spread, note=note
+                    atr, size, spread=spread, note='auto-detected close'
                 )
                 db_update(key, result)
 
-    # ── إدارة الصفقات المفتوحة ──────────────────────
     for pos in positions:
         try:
             p         = pos.get('position', {})
@@ -800,7 +781,6 @@ def manage_open_positions(positions):
 
             new_sl = None
 
-            # [2] BREAK-EVEN — SL ينتقل لنقطة الدخول بالضبط
             if profit_r >= BE_TRIGGER_R:
                 be_sl = round(entry, 5)
                 if direction == 'BUY'  and cur_sl < be_sl:
@@ -812,10 +792,8 @@ def manage_open_positions(positions):
                     log(f'  🔒 BE {deal_id}: {cur_sl} → {new_sl}')
                     tg_mgmt(epic, 'BE', cur_sl, new_sl)
 
-            # [3] TRAILING STOP
             if profit_r >= TRAIL_TRIGGER_R and cur_atr > 0:
                 base_sl = new_sl or cur_sl
-
                 if TRAIL_MODE == 'STRUCTURE':
                     swing = _swing_sl(df_c, direction, SWING_LOOKBACK)
                     if swing is not None:
@@ -857,6 +835,11 @@ def run_scan():
         log('⏸  عطلة نهاية الأسبوع')
         return
 
+    # ── [8] فلتر الجلسة: 07:00 – 17:00 UTC (10:00 – 20:00 بتوقيتك) ──
+    if not (7 <= now.hour < 17):
+        log(f'⏸  خارج جلسة التداول (UTC {now.hour:02d}:00 | يبدأ 07:00 وينتهي 17:00)')
+        return
+
     # [6] ملخص يومي عند 17:00 UTC
     if now.hour == 17 and now.minute < (SCAN_INTERVAL // 60 + 1):
         csv_summary(period='daily')
@@ -869,14 +852,13 @@ def run_scan():
     open_pos = get_open_positions()
     log(f'  صفقات مفتوحة: {len(open_pos)} / {MAX_OPEN_TRADES}')
 
-    # إدارة الصفقات المفتوحة + كشف المغلقة
     manage_open_positions(open_pos)
 
     if len(open_pos) >= MAX_OPEN_TRADES:
         log('  ⏸  الحد الأقصى للصفقات')
         return
 
-    ts_key = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
+    ts_key = now.strftime('%Y-%m-%d_%H')
 
     for pair_name, config in PAIRS.items():
         consec = db_consec_losses(pair_name)
@@ -929,6 +911,7 @@ def start_bot():
     print(f'  BE       : {BE_TRIGGER_R}R',           flush=True)
     print(f'  Trail    : {TRAIL_MODE} @ {TRAIL_TRIGGER_R}R', flush=True)
     print(f'  Spread   : max {MAX_SPREAD_ATR_RATIO:.0%} ATR', flush=True)
+    print(f'  Session  : 07:00 – 17:00 UTC (10:00 – 20:00 AST)', flush=True)
     print(f'  DB       : {DB_FILE}',                 flush=True)
     print(f'  CSV      : {TRADES_CSV}',              flush=True)
     for pn, pc in PAIRS.items():
@@ -941,6 +924,7 @@ def start_bot():
         f'🚀 *TL Breaks Bot v2* [{mode}]{nl}'
         f'TF: `{STRATEGY_TF}` | Trail: `{TRAIL_MODE}`{nl}'
         f'SL/TP: `{SL_ATR_MULT}/{TP_ATR_MULT}×ATR` | BE: `{BE_TRIGGER_R}R`{nl}'
+        f'Session: `07:00 – 17:00 UTC`{nl}'
         f'CSV: ✅ | DB: ✅{nl}'
         + ''.join(
             f'{pn}: BUY={"✅" if pc["allow_buy"] else "❌"} '
