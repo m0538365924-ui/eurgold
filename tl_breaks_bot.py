@@ -4,31 +4,35 @@
 # tl_breaks_bot.py — Trendlines with Breaks Bot (v2)
 # GOLD + EURUSD | Capital.com API | Railway Ready
 # ==========================================================
-# التحسينات:
+# المميزات:
 #  [1] Position Sizing احترافي  → risk / (sl_dist × contractSize)
 #  [2] Break-even               → SL ينتقل لنقطة الدخول عند 1R
-#  [3] Trailing Stop            → ATR أو Structure (قابل للضبط)
-#  [4] Max size clamp           → min/max من dealingRules
-#  [5] Spread guard             → يتجاهل إشارة إذا spread كبير
+#  [3] Trailing Stop            → ATR أو Structure
+#  [4] Spread guard             → يتجاهل إشارة إذا spread كبير
+#  [5] CSV Logger               → يسجل كل صفقة مع إحصائيات
+#  [6] Daily Summary            → ملخص يومي على Telegram
+#  [7] Railway Ready            → لا ملفات محلية حساسة
 # ==========================================================
 
-import os, json, time, sqlite3, requests
+import os, csv, json, time, sqlite3, requests
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from datetime import datetime, timezone
 from threading import Lock
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
 # ═══════════════════════════════════════════════════════
-# CONFIG
+# CONFIG — كل القيم من .env (Railway Variables)
 # ═══════════════════════════════════════════════════════
-API_KEY    = os.getenv('CAPITAL_API_KEY',  'BbmFhEF3FffkcR0Y')
-EMAIL      = os.getenv('CAPITAL_EMAIL',    'almorese2013@gmail.com')
-PASSWORD   = os.getenv('CAPITAL_PASSWORD', 'Ba050326>')
-TG_TOKEN   = os.getenv('TG_TOKEN',         '8782238258:AAEtuQg7OYAmoemhWfLqKdYpqIxfWwyKRSQ')
-TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
+API_KEY    = os.getenv('CAPITAL_API_KEY',  '')
+EMAIL      = os.getenv('CAPITAL_EMAIL',    '')
+PASSWORD   = os.getenv('CAPITAL_PASSWORD', '')
+TG_TOKEN   = os.getenv('TG_TOKEN',         '')
+TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '')
 BASE_URL   = 'https://api-capital.backend-capital.com'
 DEMO_MODE  = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 
@@ -36,44 +40,39 @@ DEMO_MODE  = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 PAIRS = {
     'GOLD': {
         'epic':          'GOLD',
-        'allow_buy':     False,
-        'allow_sell':    True,
-        'size_override': None,   # None = احسب تلقائياً
+        'allow_buy':     os.getenv('GOLD_BUY',  'false').lower() == 'true',
+        'allow_sell':    os.getenv('GOLD_SELL', 'true').lower()  == 'true',
+        'size_override': None,
     },
     'EURUSD': {
         'epic':          'EURUSD',
-        'allow_buy':     True,
-        'allow_sell':    True,
+        'allow_buy':     os.getenv('EURUSD_BUY',  'true').lower() == 'true',
+        'allow_sell':    os.getenv('EURUSD_SELL', 'true').lower() == 'true',
         'size_override': None,
     },
 }
 
 # ── Timeframe ──
-STRATEGY_TF   = os.getenv('STRATEGY_TF',   'MINUTE_15')
+STRATEGY_TF   = os.getenv('STRATEGY_TF',    'MINUTE_15')
 CANDLES_COUNT = 300
 SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
 # ── Strategy ──
-LENGTH       = int(os.getenv('LENGTH',      '10'))
-SLOPE_MULT   = float(os.getenv('SLOPE_MULT','1.0'))
-SLOPE_METHOD = os.getenv('SLOPE_METHOD',   'ATR')
+LENGTH       = int(os.getenv('LENGTH',       '10'))
+SLOPE_MULT   = float(os.getenv('SLOPE_MULT', '1.0'))
+SLOPE_METHOD = os.getenv('SLOPE_METHOD',    'ATR')
 ATR_PERIOD   = 14
 SL_ATR_MULT  = float(os.getenv('SL_ATR_MULT', '1.5'))
 TP_ATR_MULT  = float(os.getenv('TP_ATR_MULT', '2.5'))
 
-# ── [5] Spread guard ──
+# ── Filters ──
 MAX_SPREAD_ATR_RATIO = float(os.getenv('MAX_SPREAD_ATR', '0.30'))
 
-# ── [2] Break-even ──
-# BE_TRIGGER_R = كم R ربح قبل تفعيل البريك إيفن
+# ── Break-even ──
 BE_TRIGGER_R = float(os.getenv('BE_TRIGGER', '1.0'))
 
-# ── [3] Trailing Stop ──
-# TRAIL_MODE   : ATR | STRUCTURE
-# TRAIL_TRIGGER: كم R ربح قبل تفعيل التريلينغ
-# TRAIL_ATR    : عدد ATR خلف السعر (وضع ATR)
-# SWING_LOOKBACK: عدد الشموع للسوينغ (وضع STRUCTURE)
-TRAIL_MODE      = os.getenv('TRAIL_MODE',     'STRUCTURE')
+# ── Trailing ──
+TRAIL_MODE      = os.getenv('TRAIL_MODE',      'STRUCTURE')
 TRAIL_TRIGGER_R = float(os.getenv('TRAIL_TRIGGER', '1.5'))
 TRAIL_ATR_MULT  = float(os.getenv('TRAIL_ATR',     '2.0'))
 SWING_LOOKBACK  = int(os.getenv('SWING_LOOKBACK',  '5'))
@@ -84,10 +83,33 @@ MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES',    '3'))
 MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',    '5'))
 ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
-DB_FILE         = 'tl_breaks_bot.db'
+# ── Files ──
+# Railway: يُفضَّل /tmp لأن /app قد يكون read-only
+_BASE_DIR   = os.getenv('DATA_DIR', '/tmp')
+DB_FILE     = os.path.join(_BASE_DIR, 'tl_breaks_bot.db')
+TRADES_CSV  = os.path.join(_BASE_DIR, 'trades_log.csv')
+
 db_lock         = Lock()
 session_headers = {}
-_meta_cache: dict = {}   # cache لبيانات السوق
+_meta_cache: dict = {}
+
+CSV_HEADERS = [
+    'date', 'time_utc', 'pair', 'direction',
+    'entry', 'sl', 'tp', 'exit_price',
+    'atr', 'size', 'sl_dist',
+    'pnl_usd', 'pnl_r', 'result',
+    'bars_held', 'spread', 'tf', 'note',
+]
+
+
+# ═══════════════════════════════════════════════════════
+# UTILS
+# ═══════════════════════════════════════════════════════
+def utc_now():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+def log(msg):
+    print(f'[{utc_now()}] {msg}', flush=True)
 
 
 # ═══════════════════════════════════════════════════════
@@ -101,22 +123,28 @@ def db_init():
             pair      TEXT,
             direction TEXT,
             timestamp TEXT,
-            entry REAL, sl REAL, tp REAL,
-            atr   REAL, size REAL,
-            status TEXT DEFAULT 'PENDING'
+            entry     REAL, sl REAL, tp REAL,
+            atr       REAL, size REAL,
+            spread    REAL DEFAULT 0,
+            status    TEXT DEFAULT 'PENDING'
         )''')
+        for col, defn in [('spread', 'REAL DEFAULT 0')]:
+            try:
+                conn.execute(f'ALTER TABLE trades ADD COLUMN {col} {defn}')
+            except Exception:
+                pass
         conn.commit()
 
-def db_save(key, pair, direction, entry, sl, tp, atr, size):
+def db_save(key, pair, direction, entry, sl, tp, atr, size, spread=0.0):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
             try:
                 conn.execute(
                     'INSERT INTO trades'
-                    ' (key,pair,direction,timestamp,entry,sl,tp,atr,size)'
-                    ' VALUES (?,?,?,?,?,?,?,?,?)',
+                    ' (key,pair,direction,timestamp,entry,sl,tp,atr,size,spread)'
+                    ' VALUES (?,?,?,?,?,?,?,?,?,?)',
                     (key, pair, direction, utc_now(),
-                     entry, sl, tp, atr, size)
+                     entry, sl, tp, atr, size, spread)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -151,19 +179,160 @@ def db_consec_losses(pair):
                 else: break
             return count
 
+def db_get_pending(pair):
+    """يُرجع آخر صفقة PENDING للزوج (entry, sl, tp, atr, size, spread)"""
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT entry,sl,tp,atr,size,spread FROM trades"
+                " WHERE pair=? AND status='PENDING'"
+                " ORDER BY id DESC LIMIT 1", (pair,)
+            ).fetchone()
+            return row
+
 
 # ═══════════════════════════════════════════════════════
-# UTILS
+# [5] CSV LOGGER
 # ═══════════════════════════════════════════════════════
-def utc_now():
-    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+def csv_init():
+    if not Path(TRADES_CSV).exists():
+        with open(TRADES_CSV, 'w', newline='', encoding='utf-8-sig') as f:
+            csv.DictWriter(f, fieldnames=CSV_HEADERS).writeheader()
+        log(f'📄 CSV جاهز: {TRADES_CSV}')
 
-def log(msg):
-    print(f'[{utc_now()}] {msg}', flush=True)
+def csv_log_trade(pair, direction, entry, sl, tp, exit_price,
+                  atr, size, spread=0.0, bars_held=0, note=''):
+    """يحسب النتيجة ويكتبها في CSV + يُرسل إشعار Telegram."""
+    try:
+        sl_dist = abs(entry - sl)
+        pnl_pts = (exit_price - entry) if direction == 'BUY' else (entry - exit_price)
+
+        cached  = _meta_cache.get(pair)
+        cs_val  = cached['data'][3] if cached else 100.0
+        pnl_usd = round(pnl_pts * size * cs_val, 2)
+        pnl_r   = round(pnl_pts / sl_dist, 2) if sl_dist > 0 else 0.0
+        result  = 'WIN' if pnl_pts > 0 else ('LOSS' if pnl_pts < 0 else 'BE')
+
+        now = datetime.now(timezone.utc)
+        row = {
+            'date':       now.strftime('%Y-%m-%d'),
+            'time_utc':   now.strftime('%H:%M'),
+            'pair':       pair,
+            'direction':  direction,
+            'entry':      entry,
+            'sl':         sl,
+            'tp':         tp,
+            'exit_price': exit_price,
+            'atr':        atr,
+            'size':       size,
+            'sl_dist':    round(sl_dist, 5),
+            'pnl_usd':    pnl_usd,
+            'pnl_r':      pnl_r,
+            'result':     result,
+            'bars_held':  bars_held,
+            'spread':     spread,
+            'tf':         STRATEGY_TF,
+            'note':       note,
+        }
+
+        with open(TRADES_CSV, 'a', newline='', encoding='utf-8-sig') as f:
+            csv.DictWriter(f, fieldnames=CSV_HEADERS).writerow(row)
+
+        icon = '✅' if result == 'WIN' else ('❌' if result == 'LOSS' else '🔵')
+        log(f'  {icon} TRADE CLOSED: {pair} {direction} | '
+            f'PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R) | {result}')
+
+        nl = '\n'
+        tg(
+            f'{icon} *{pair} {direction} CLOSED — {result}*{nl}'
+            f'Entry: `{entry}` → Exit: `{exit_price}`{nl}'
+            f'PnL: `${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}'
+            f'Size: `{size}` | SL dist: `{sl_dist:.5f}`{nl}'
+            f'Note: _{note}_{nl}'
+            f'_{now.strftime("%Y-%m-%d %H:%M UTC")}_'
+        )
+        return result
+
+    except Exception as ex:
+        log(f'  csv_log_trade ERROR: {ex}')
+        return 'ERROR'
+
+def csv_summary(period='daily'):
+    """ملخص إحصائي من CSV — يُرسل لـ Telegram."""
+    if not Path(TRADES_CSV).exists():
+        return
+    try:
+        df = pd.read_csv(TRADES_CSV, encoding='utf-8-sig')
+        if df.empty:
+            log('  CSV فارغ — لا ملخص')
+            return
+
+        # فلتر حسب الفترة
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        if period == 'daily':
+            df = df[df['date'] == today]
+            label = f'Daily — {today}'
+        elif period == 'weekly':
+            df['date'] = pd.to_datetime(df['date'])
+            week_start = pd.Timestamp.now(tz='UTC').floor('D') - pd.Timedelta(days=7)
+            df = df[df['date'] >= week_start]
+            label = 'Last 7 Days'
+        else:
+            label = 'All Time'
+
+        if df.empty:
+            log(f'  لا صفقات للفترة: {label}')
+            return
+
+        total     = len(df)
+        wins      = (df['result'] == 'WIN').sum()
+        losses    = (df['result'] == 'LOSS').sum()
+        wr        = round(wins / total * 100, 1)
+        total_pnl = round(df['pnl_usd'].sum(), 2)
+        total_r   = round(df['pnl_r'].sum(),   2)
+        avg_r     = round(df['pnl_r'].mean(),  2)
+        best      = df.loc[df['pnl_usd'].idxmax()]
+        worst     = df.loc[df['pnl_usd'].idxmin()]
+        gross_win = df[df['pnl_usd'] > 0]['pnl_usd'].sum()
+        gross_los = abs(df[df['pnl_usd'] < 0]['pnl_usd'].sum())
+        pf        = round(gross_win / gross_los, 2) if gross_los > 0 else 0.0
+
+        # max consecutive losses
+        mc = cur = 0
+        for r in df['result']:
+            if r == 'LOSS': cur += 1; mc = max(mc, cur)
+            else: cur = 0
+
+        print(f'\n{"═"*50}', flush=True)
+        print(f'  📊 {label}', flush=True)
+        print(f'{"═"*50}', flush=True)
+        print(f'  Trades       : {total}', flush=True)
+        print(f'  WIN / LOSS   : {wins} / {losses}', flush=True)
+        print(f'  Win Rate     : {wr}%', flush=True)
+        print(f'  Profit Factor: {pf}', flush=True)
+        print(f'  Total PnL    : ${total_pnl:+.2f}', flush=True)
+        print(f'  Total R      : {total_r:+.2f}R', flush=True)
+        print(f'  Avg R/trade  : {avg_r:+.2f}R', flush=True)
+        print(f'  Max consec L : {mc}', flush=True)
+        print(f'  Best Trade   : ${best["pnl_usd"]:+.2f} ({best["pair"]})', flush=True)
+        print(f'  Worst Trade  : ${worst["pnl_usd"]:+.2f} ({worst["pair"]})', flush=True)
+        print(f'{"═"*50}\n', flush=True)
+
+        nl = '\n'
+        tg(
+            f'📊 *Summary — {label}*{nl}'
+            f'Trades: `{total}` | WR: `{wr}%` | PF: `{pf}`{nl}'
+            f'PnL: `${total_pnl:+.2f}` | R: `{total_r:+.2f}R`{nl}'
+            f'Avg R: `{avg_r:+.2f}R` | MaxL: `{mc}`{nl}'
+            f'Best: `${best["pnl_usd"]:+.2f}` | Worst: `${worst["pnl_usd"]:+.2f}`'
+        )
+
+    except Exception as ex:
+        log(f'  csv_summary ERROR: {ex}')
 
 
 # ═══════════════════════════════════════════════════════
-# API HELPERS — retries
+# API HELPERS — retries + backoff
 # ═══════════════════════════════════════════════════════
 def _get(path, params=None, retries=3):
     for attempt in range(retries):
@@ -247,33 +416,25 @@ def get_open_positions():
         return r.json().get('positions', [])
     return []
 
-# ── [1] احترافي: يجلب contractSize + min/max size من API ──
 def get_instrument_meta(epic):
-    """
-    Cache 5 دقائق.
-    Returns: (bid, ask, spread, contractSize, min_size, max_size)
-    """
+    """Cache 5 دقائق. Returns (bid,ask,spread,cs,min_sz,max_sz)"""
     now    = time.time()
     cached = _meta_cache.get(epic)
     if cached and (now - cached['ts']) < 300:
         return cached['data']
-
     r = _get(f'/api/v1/markets/{epic}')
     if not r or r.status_code != 200:
         return 0.0, 0.0, 0.0, 100.0, 0.1, 1000.0
-
     data       = r.json()
     snap       = data.get('snapshot',     {})
     instrument = data.get('instrument',   {})
     dealing    = data.get('dealingRules', {})
-
     bid    = float(snap.get('bid',   0) or 0)
     ask    = float(snap.get('offer', 0) or 0)
     spread = round(ask - bid, 5)
     cs     = float(instrument.get('contractSize', 100) or 100)
     min_sz = float((dealing.get('minDealSize') or {}).get('value', 0.1)  or 0.1)
     max_sz = float((dealing.get('maxDealSize') or {}).get('value', 1000) or 1000)
-
     result = (bid, ask, spread, cs, min_sz, max_sz)
     _meta_cache[epic] = {'ts': now, 'data': result}
     return result
@@ -319,8 +480,7 @@ def tg_result(pair, direction, status, ref, error=''):
 
 def tg_mgmt(pair, action, old_sl, new_sl):
     icons = {'BE': '🔒', 'TRAIL': '📈'}
-    tg(f'{icons.get(action,"⚙️")} *{action}* {pair}'
-       f'\nSL: `{old_sl}` → `{new_sl}`')
+    tg(f'{icons.get(action,"⚙️")} *{action}* {pair}\nSL: `{old_sl}` → `{new_sl}`')
 
 
 # ═══════════════════════════════════════════════════════
@@ -387,8 +547,7 @@ def get_slope_val(method, df, idx, length, mult, atr_series):
         start = max(0, idx - length + 1)
         y = df['close'].iloc[start:idx+1].values
         if len(y) >= 2:
-            slope = np.polyfit(np.arange(len(y)), y, 1)[0]
-            return abs(slope) * mult
+            return abs(np.polyfit(np.arange(len(y)), y, 1)[0]) * mult
     return atr_val * mult / length
 
 def tl_value(anchor_idx, anchor_val, slope, goes_up, cur_idx):
@@ -397,20 +556,13 @@ def tl_value(anchor_idx, anchor_val, slope, goes_up, cur_idx):
 
 
 # ═══════════════════════════════════════════════════════
-# [1] POSITION SIZING — احترافي
+# [1] POSITION SIZING
 # ═══════════════════════════════════════════════════════
 def calc_position_size(risk_usd, sl_dist, contract_size, min_size, max_size):
-    """
-    الصيغة الصحيحة:
-    size = risk_usd / (sl_dist × contractSize)
-
-    مثال GOLD  (cs=100):  $10 / (5 × 100)    = 0.02 lot
-    مثال EURUSD(cs=100k): $10 / (0.005 × 1e5) = 0.02 lot
-    """
+    """size = risk_usd / (sl_dist × contractSize)"""
     if sl_dist <= 0 or contract_size <= 0:
         return min_size
     size = round(risk_usd / (sl_dist * contract_size), 2)
-    # clamp بين حدود API
     return max(min(size, max_size), min_size)
 
 
@@ -428,16 +580,14 @@ def check_signal(pair_name, config):
     if df.empty:
         return None
 
-    # نتجاهل الشمعة الأخيرة (غير مكتملة)
     df_c  = df.iloc[:-1].copy().reset_index(drop=True)
     atr_s = calc_atr_series(df_c, ATR_PERIOD)
-
     ph_arr = find_pivot_high(df_c['high'], LENGTH)
     pl_arr = find_pivot_low(df_c['low'],   LENGTH)
 
-    n         = len(df_c)
-    upper_tl  = None
-    lower_tl  = None
+    n        = len(df_c)
+    upper_tl = None
+    lower_tl = None
 
     for i in range(LENGTH + ATR_PERIOD, n):
         atr_i = float(atr_s.iloc[i])
@@ -459,15 +609,14 @@ def check_signal(pair_name, config):
     if np.isnan(last_atr) or last_atr <= 0:
         return None
 
-    # [1] جلب بيانات السوق (مع cache)
     bid, ask, spread, cs, min_sz, max_sz = get_instrument_meta(epic)
     if bid <= 0 or ask <= 0:
         return None
 
-    # [5] Spread guard
+    # [4] Spread guard
     spread_ratio = spread / last_atr
     if spread_ratio > MAX_SPREAD_ATR_RATIO:
-        log(f'  {pair_name}: spread {spread_ratio:.1%} > حد {MAX_SPREAD_ATR_RATIO:.1%} — تخطّي')
+        log(f'  {pair_name}: spread {spread_ratio:.1%} > {MAX_SPREAD_ATR_RATIO:.1%} — skip')
         return None
 
     signal = None
@@ -492,28 +641,24 @@ def check_signal(pair_name, config):
         return None
 
     entry = ask if signal == 'BUY' else bid
-
-    if signal == 'BUY':
-        sl = round(entry - SL_ATR_MULT * last_atr, 5)
-        tp = round(entry + TP_ATR_MULT * last_atr, 5)
-    else:
-        sl = round(entry + SL_ATR_MULT * last_atr, 5)
-        tp = round(entry - TP_ATR_MULT * last_atr, 5)
+    sl    = round(entry - SL_ATR_MULT * last_atr, 5) if signal == 'BUY' \
+            else round(entry + SL_ATR_MULT * last_atr, 5)
+    tp    = round(entry + TP_ATR_MULT * last_atr, 5) if signal == 'BUY' \
+            else round(entry - TP_ATR_MULT * last_atr, 5)
 
     sl_dist = abs(entry - sl)
     if sl_dist < last_atr * 0.1:
-        log(f'  {pair_name}: SL صغير جداً — تخطّي')
+        log(f'  {pair_name}: SL صغير جداً — skip')
         return None
 
-    # [1] حساب الحجم الاحترافي
     if config.get('size_override') is not None:
         size = max(min(float(config['size_override']), max_sz), min_sz)
     else:
         risk_usd = ACCOUNT_BALANCE * RISK_PERCENT
         size     = calc_position_size(risk_usd, sl_dist, cs, min_sz, max_sz)
 
-    log(f'  {pair_name}: size={size} | risk≈${round(size*sl_dist*cs,2)}'
-        f' | cs={cs} | sl_dist={sl_dist:.5f}')
+    log(f'  {pair_name}: size={size} risk≈${round(size*sl_dist*cs,2)}'
+        f' cs={cs} sl_dist={sl_dist:.5f}')
 
     return {
         'pair':      pair_name,
@@ -570,14 +715,9 @@ def execute_order(sig):
 
 
 # ═══════════════════════════════════════════════════════
-# [2] BREAK-EVEN + [3] TRAILING STOP
+# [2][3] TRADE MANAGEMENT — BE + Trailing
 # ═══════════════════════════════════════════════════════
 def _swing_sl(df_c, direction, lookback):
-    """
-    [3] STRUCTURE trailing:
-    BUY  → SL = أدنى Low في آخر N شمعة
-    SELL → SL = أعلى High في آخر N شمعة
-    """
     if len(df_c) < lookback:
         return None
     recent = df_c.iloc[-lookback:]
@@ -586,11 +726,46 @@ def _swing_sl(df_c, direction, lookback):
 
 def manage_open_positions(positions):
     """
-    يُشغَّل على كل صفقة مفتوحة:
-    1. Break-even عند BE_TRIGGER_R
-    2. Trailing Stop عند TRAIL_TRIGGER_R
-    SL لا يتحرك للخلف أبداً.
+    [5] يكشف الصفقات المغلقة ويسجلها في CSV.
+    [2] Break-even عند BE_TRIGGER_R.
+    [3] Trailing Stop (ATR أو Structure).
     """
+    open_deal_ids = {
+        pos['position']['dealId']
+        for pos in positions
+        if pos.get('position', {}).get('dealId')
+    }
+
+    # ── كشف الصفقات المغلقة وتسجيلها ──────────────
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            pending = conn.execute(
+                "SELECT key,pair,direction,entry,sl,tp,atr,size,spread"
+                " FROM trades WHERE status='PENDING'"
+            ).fetchall()
+
+    for row in pending:
+        key, pair, direction, entry, sl, tp, atr, size, spread = row
+        # ابحث عن deal_id المرتبط بهذا الزوج في الصفقات المفتوحة
+        still_open = any(
+            pos.get('market', {}).get('epic', '') == PAIRS.get(pair, {}).get('epic', '')
+            for pos in positions
+        )
+        if not still_open:
+            # الصفقة أُغلقت — احسب الخروج من السعر الحالي
+            epic = PAIRS.get(pair, {}).get('epic', pair)
+            bid, ask, _, _, _, _ = get_instrument_meta(epic)
+            exit_price = bid if direction == 'BUY' else ask
+
+            if exit_price > 0:
+                note = 'auto-detected close'
+                result = csv_log_trade(
+                    pair, direction, entry, sl, tp, exit_price,
+                    atr, size, spread=spread, note=note
+                )
+                db_update(key, result)
+
+    # ── إدارة الصفقات المفتوحة ──────────────────────
     for pos in positions:
         try:
             p         = pos.get('position', {})
@@ -603,7 +778,6 @@ def manage_open_positions(positions):
             if not deal_id or not entry or not epic:
                 continue
 
-            # السعر الحالي
             bid, ask, _, _, _, _ = get_instrument_meta(epic)
             price = bid if direction == 'BUY' else ask
             if not price:
@@ -616,7 +790,6 @@ def manage_open_positions(positions):
             profit_r = ((price - entry) if direction == 'BUY'
                         else (entry - price)) / sl_dist
 
-            # جلب شموع للـ trailing
             df   = fetch_candles(epic, STRATEGY_TF, 60)
             if df.empty:
                 continue
@@ -626,8 +799,7 @@ def manage_open_positions(positions):
 
             new_sl = None
 
-            # ── [2] BREAK-EVEN ──────────────────────────
-            # ينتقل SL إلى نقطة الدخول بالضبط عند BE_TRIGGER_R
+            # [2] BREAK-EVEN — SL ينتقل لنقطة الدخول بالضبط
             if profit_r >= BE_TRIGGER_R:
                 be_sl = round(entry, 5)
                 if direction == 'BUY'  and cur_sl < be_sl:
@@ -639,12 +811,11 @@ def manage_open_positions(positions):
                     log(f'  🔒 BE {deal_id}: {cur_sl} → {new_sl}')
                     tg_mgmt(epic, 'BE', cur_sl, new_sl)
 
-            # ── [3] TRAILING STOP ────────────────────────
+            # [3] TRAILING STOP
             if profit_r >= TRAIL_TRIGGER_R and cur_atr > 0:
-                base_sl = new_sl or cur_sl   # لا نتراجع عن BE إذا فُعّل
+                base_sl = new_sl or cur_sl
 
                 if TRAIL_MODE == 'STRUCTURE':
-                    # خلف آخر سوينغ لو
                     swing = _swing_sl(df_c, direction, SWING_LOOKBACK)
                     if swing is not None:
                         better = (swing > base_sl if direction == 'BUY'
@@ -654,7 +825,6 @@ def manage_open_positions(positions):
                             log(f'  📈 TRAIL(STRUCT) {deal_id}: → {new_sl}')
                             tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
                 else:
-                    # ATR trailing
                     if direction == 'BUY':
                         atr_sl = round(price - TRAIL_ATR_MULT * cur_atr, 5)
                         if atr_sl > base_sl + 1e-6:
@@ -668,7 +838,6 @@ def manage_open_positions(positions):
                             log(f'  📈 TRAIL(ATR) {deal_id}: → {new_sl}')
                             tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
 
-            # تحديث SL في API
             if new_sl is not None:
                 r = _put(f'/api/v1/positions/{deal_id}', {'stopLevel': new_sl})
                 if r:
@@ -687,6 +856,10 @@ def run_scan():
         log('⏸  عطلة نهاية الأسبوع')
         return
 
+    # [6] ملخص يومي عند 17:00 UTC
+    if now.hour == 17 and now.minute < (SCAN_INTERVAL // 60 + 1):
+        csv_summary(period='daily')
+
     log('─' * 55)
     log(f'🔍 Scan | TF={STRATEGY_TF} | {"DEMO" if DEMO_MODE else "LIVE"}')
     log('─' * 55)
@@ -695,9 +868,8 @@ def run_scan():
     open_pos = get_open_positions()
     log(f'  صفقات مفتوحة: {len(open_pos)} / {MAX_OPEN_TRADES}')
 
-    # [2][3] إدارة الصفقات المفتوحة أولاً
-    if open_pos:
-        manage_open_positions(open_pos)
+    # إدارة الصفقات المفتوحة + كشف المغلقة
+    manage_open_positions(open_pos)
 
     if len(open_pos) >= MAX_OPEN_TRADES:
         log('  ⏸  الحد الأقصى للصفقات')
@@ -708,7 +880,7 @@ def run_scan():
     for pair_name, config in PAIRS.items():
         consec = db_consec_losses(pair_name)
         if consec >= MAX_CONSECUTIVE_LOSS:
-            log(f'  {pair_name}: ⚠️  {consec} خسائر متتالية — تخطّي')
+            log(f'  {pair_name}: ⚠️  {consec} خسائر — تخطّي')
             continue
 
         key = f'{pair_name}_{ts_key}'
@@ -725,7 +897,7 @@ def run_scan():
 
         db_save(key, pair_name, sig['direction'],
                 sig['entry'], sig['sl'], sig['tp'],
-                sig['atr'], sig['size'])
+                sig['atr'], sig['size'], sig['spread'])
         tg_signal(sig)
 
         status, ref = execute_order(sig)
@@ -743,18 +915,21 @@ def run_scan():
 # ═══════════════════════════════════════════════════════
 def start_bot():
     db_init()
+    csv_init()
+
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
     nl   = '\n'
 
     print('=' * 55, flush=True)
-    print(f'  Trendlines Breaks Bot v2 [{mode}]', flush=True)
-    print(f'  TF       : {STRATEGY_TF}',          flush=True)
-    print(f'  Method   : {SLOPE_METHOD}',          flush=True)
-    print(f'  Length   : {LENGTH}',                flush=True)
+    print(f'  TL Breaks Bot v2 [{mode}] — Railway', flush=True)
+    print(f'  TF       : {STRATEGY_TF}',            flush=True)
+    print(f'  Method   : {SLOPE_METHOD}',            flush=True)
     print(f'  SL/TP    : {SL_ATR_MULT}/{TP_ATR_MULT}×ATR', flush=True)
-    print(f'  BE       : {BE_TRIGGER_R}R → entry',flush=True)
+    print(f'  BE       : {BE_TRIGGER_R}R',           flush=True)
     print(f'  Trail    : {TRAIL_MODE} @ {TRAIL_TRIGGER_R}R', flush=True)
     print(f'  Spread   : max {MAX_SPREAD_ATR_RATIO:.0%} ATR', flush=True)
+    print(f'  DB       : {DB_FILE}',                 flush=True)
+    print(f'  CSV      : {TRADES_CSV}',              flush=True)
     for pn, pc in PAIRS.items():
         b = '✅' if pc['allow_buy']  else '❌'
         s = '✅' if pc['allow_sell'] else '❌'
@@ -763,9 +938,9 @@ def start_bot():
 
     tg(
         f'🚀 *TL Breaks Bot v2* [{mode}]{nl}'
-        f'TF: `{STRATEGY_TF}` | Method: `{SLOPE_METHOD}`{nl}'
-        f'SL/TP: `{SL_ATR_MULT}/{TP_ATR_MULT}×ATR`{nl}'
-        f'BE: `{BE_TRIGGER_R}R` | Trail: `{TRAIL_MODE}@{TRAIL_TRIGGER_R}R`{nl}'
+        f'TF: `{STRATEGY_TF}` | Trail: `{TRAIL_MODE}`{nl}'
+        f'SL/TP: `{SL_ATR_MULT}/{TP_ATR_MULT}×ATR` | BE: `{BE_TRIGGER_R}R`{nl}'
+        f'CSV: ✅ | DB: ✅{nl}'
         + ''.join(
             f'{pn}: BUY={"✅" if pc["allow_buy"] else "❌"} '
             f'SELL={"✅" if pc["allow_sell"] else "❌"}{nl}'
@@ -788,6 +963,7 @@ def start_bot():
 
         except KeyboardInterrupt:
             log('🛑 Bot stopped')
+            csv_summary(period='all')
             tg('🛑 TL Breaks Bot v2 stopped')
             break
         except Exception as ex:
