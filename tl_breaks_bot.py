@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==========================================================
-# tl_breaks_bot.py — Trendlines with Breaks Bot
+# tl_breaks_bot.py — Trendlines with Breaks Bot (v2)
 # GOLD + EURUSD | Capital.com API | Railway Ready
 # ==========================================================
-# الاستراتيجية:
-#   1. كشف Pivot Highs/Lows
-#   2. رسم خطوط ترند بميل ATR
-#   3. Breakout: close > upper TL → BUY
-#                close < lower TL → SELL
-#   4. دخول على open الشمعة التالية (Market Order)
-#   5. SL/TP بناءً على ATR
+# التحسينات:
+#  [1] Position Sizing احترافي  → risk / (sl_dist × contractSize)
+#  [2] Break-even               → SL ينتقل لنقطة الدخول عند 1R
+#  [3] Trailing Stop            → ATR أو Structure (قابل للضبط)
+#  [4] Max size clamp           → min/max من dealingRules
+#  [5] Spread guard             → يتجاهل إشارة إذا spread كبير
 # ==========================================================
 
 import os, json, time, sqlite3, requests
@@ -22,87 +21,88 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ================================================
-# ⚙️  CONFIG — عدّلها أو ضعها في .env
-# ================================================
+# ═══════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════
 API_KEY    = os.getenv('CAPITAL_API_KEY',  'BbmFhEF3FffkcR0Y')
 EMAIL      = os.getenv('CAPITAL_EMAIL',    'almorese2013@gmail.com')
 PASSWORD   = os.getenv('CAPITAL_PASSWORD', 'Ba050326>')
 TG_TOKEN   = os.getenv('TG_TOKEN',         '8782238258:AAEtuQg7OYAmoemhWfLqKdYpqIxfWwyKRSQ')
 TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
-
 BASE_URL   = 'https://api-capital.backend-capital.com'
 DEMO_MODE  = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 
-# ================================================
-# 📊 PAIRS CONFIG
-# ================================================
-# لكل زوج: epic, allow_buy, allow_sell, size_override (None=احسب تلقائي)
+# ── Pairs ──
 PAIRS = {
     'GOLD': {
-        'epic':        'GOLD',
-        'allow_buy':   False,   # ← SELL فقط للذهب (بناءً على الباكتيست)
-        'allow_sell':  True,
-        'size_override': None,
+        'epic':          'GOLD',
+        'allow_buy':     False,
+        'allow_sell':    True,
+        'size_override': None,   # None = احسب تلقائياً
     },
     'EURUSD': {
-        'epic':        'EURUSD',
-        'allow_buy':   True,    # ← BUY + SELL لليورو
-        'allow_sell':  True,
-        'size_override': 1000,
-        'correlated_with': ['GBPUSD'],
+        'epic':          'EURUSD',
+        'allow_buy':     True,
+        'allow_sell':    True,
+        'size_override': None,
     },
 }
 
-# ================================================
-# 📈 TIMEFRAME CONFIG
-# ================================================
-# الفريم المستخدم للاستراتيجية
-# خيارات: MINUTE, MINUTE_2, MINUTE_5, MINUTE_15,
-#          MINUTE_30, HOUR, HOUR_4, DAY
-STRATEGY_TF     = os.getenv('STRATEGY_TF', 'MINUTE_15')
-CANDLES_COUNT   = 300    # عدد الشموع المجلوبة
+# ── Timeframe ──
+STRATEGY_TF   = os.getenv('STRATEGY_TF',   'MINUTE_15')
+CANDLES_COUNT = 300
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
-# مدة الانتظار بين كل scan (ثانية)
-# يفضّل = مدة الفريم ÷ 4 تقريباً
-SCAN_INTERVAL   = int(os.getenv('SCAN_INTERVAL', '300'))  # ثانية
-
-# ================================================
-# 🎯 STRATEGY PARAMETERS
-# ================================================
-LENGTH       = int(os.getenv('LENGTH',   '10'))    # فترة الـ PivotS
-SLOPE_MULT   = float(os.getenv('SLOPE_MULT', '1.0'))
-SLOPE_METHOD = os.getenv('SLOPE_METHOD', 'ATR')    # ATR | Stdev | Linreg
+# ── Strategy ──
+LENGTH       = int(os.getenv('LENGTH',      '10'))
+SLOPE_MULT   = float(os.getenv('SLOPE_MULT','1.0'))
+SLOPE_METHOD = os.getenv('SLOPE_METHOD',   'ATR')
 ATR_PERIOD   = 14
-
 SL_ATR_MULT  = float(os.getenv('SL_ATR_MULT', '1.5'))
 TP_ATR_MULT  = float(os.getenv('TP_ATR_MULT', '2.5'))
 
-# ================================================
-# 💰 RISK
-# ================================================
-RISK_PERCENT         = float(os.getenv('RISK_PERCENT', '0.01'))
-MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '3'))
-MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS', '5'))
+# ── [5] Spread guard ──
+MAX_SPREAD_ATR_RATIO = float(os.getenv('MAX_SPREAD_ATR', '0.30'))
+
+# ── [2] Break-even ──
+# BE_TRIGGER_R = كم R ربح قبل تفعيل البريك إيفن
+BE_TRIGGER_R = float(os.getenv('BE_TRIGGER', '1.0'))
+
+# ── [3] Trailing Stop ──
+# TRAIL_MODE   : ATR | STRUCTURE
+# TRAIL_TRIGGER: كم R ربح قبل تفعيل التريلينغ
+# TRAIL_ATR    : عدد ATR خلف السعر (وضع ATR)
+# SWING_LOOKBACK: عدد الشموع للسوينغ (وضع STRUCTURE)
+TRAIL_MODE      = os.getenv('TRAIL_MODE',     'STRUCTURE')
+TRAIL_TRIGGER_R = float(os.getenv('TRAIL_TRIGGER', '1.5'))
+TRAIL_ATR_MULT  = float(os.getenv('TRAIL_ATR',     '2.0'))
+SWING_LOOKBACK  = int(os.getenv('SWING_LOOKBACK',  '5'))
+
+# ── Risk ──
+RISK_PERCENT         = float(os.getenv('RISK_PERCENT',     '0.01'))
+MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES',    '3'))
+MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',    '5'))
 ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
-# ================================================
-# 🗄️  DATABASE
-# ================================================
-DB_FILE  = 'tl_breaks_bot.db'
-db_lock  = Lock()
+DB_FILE         = 'tl_breaks_bot.db'
+db_lock         = Lock()
 session_headers = {}
+_meta_cache: dict = {}   # cache لبيانات السوق
 
+
+# ═══════════════════════════════════════════════════════
+# DATABASE
+# ═══════════════════════════════════════════════════════
 def db_init():
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute('''CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT UNIQUE,
-            pair TEXT,
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            key       TEXT UNIQUE,
+            pair      TEXT,
             direction TEXT,
             timestamp TEXT,
             entry REAL, sl REAL, tp REAL,
-            atr REAL, size REAL,
+            atr   REAL, size REAL,
             status TEXT DEFAULT 'PENDING'
         )''')
         conn.commit()
@@ -112,9 +112,11 @@ def db_save(key, pair, direction, entry, sl, tp, atr, size):
         with sqlite3.connect(DB_FILE) as conn:
             try:
                 conn.execute(
-                    'INSERT INTO trades (key,pair,direction,timestamp,entry,sl,tp,atr,size)'
+                    'INSERT INTO trades'
+                    ' (key,pair,direction,timestamp,entry,sl,tp,atr,size)'
                     ' VALUES (?,?,?,?,?,?,?,?,?)',
-                    (key, pair, direction, utc_now(), entry, sl, tp, atr, size)
+                    (key, pair, direction, utc_now(),
+                     entry, sl, tp, atr, size)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -123,7 +125,9 @@ def db_save(key, pair, direction, entry, sl, tp, atr, size):
 def db_update(key, status):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
-            conn.execute('UPDATE trades SET status=? WHERE key=?', (status, key))
+            conn.execute(
+                'UPDATE trades SET status=? WHERE key=?', (status, key)
+            )
             conn.commit()
 
 def db_is_dup(key):
@@ -137,9 +141,9 @@ def db_consec_losses(pair):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
             rows = conn.execute(
-                "SELECT status FROM trades WHERE pair=? AND status IN ('WIN','LOSS')"
-                " ORDER BY id DESC LIMIT 8",
-                (pair,)
+                "SELECT status FROM trades"
+                " WHERE pair=? AND status IN ('WIN','LOSS')"
+                " ORDER BY id DESC LIMIT 8", (pair,)
             ).fetchall()
             count = 0
             for r in rows:
@@ -147,150 +151,191 @@ def db_consec_losses(pair):
                 else: break
             return count
 
-# ================================================
-# 🔧 UTILS
-# ================================================
+
+# ═══════════════════════════════════════════════════════
+# UTILS
+# ═══════════════════════════════════════════════════════
 def utc_now():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
 def log(msg):
     print(f'[{utc_now()}] {msg}', flush=True)
 
-# ================================================
-# 🌐 SESSION
-# ================================================
+
+# ═══════════════════════════════════════════════════════
+# API HELPERS — retries
+# ═══════════════════════════════════════════════════════
+def _get(path, params=None, retries=3):
+    for attempt in range(retries):
+        try:
+            r = requests.get(
+                BASE_URL + path, headers=session_headers,
+                params=params, timeout=15
+            )
+            if r.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+            return r
+        except requests.exceptions.RequestException as ex:
+            log(f'  GET {path} [{attempt+1}/{retries}]: {ex}')
+            time.sleep(3 * (attempt + 1))
+    return None
+
+def _post(path, body, retries=2):
+    for attempt in range(retries):
+        try:
+            return requests.post(
+                BASE_URL + path, headers=session_headers,
+                json=body, timeout=15
+            )
+        except requests.exceptions.RequestException as ex:
+            log(f'  POST {path} [{attempt+1}/{retries}]: {ex}')
+            time.sleep(3 * (attempt + 1))
+    return None
+
+def _put(path, body):
+    try:
+        return requests.put(
+            BASE_URL + path, headers=session_headers,
+            json=body, timeout=10
+        )
+    except Exception as ex:
+        log(f'  PUT {path}: {ex}')
+    return None
+
+
+# ═══════════════════════════════════════════════════════
+# SESSION
+# ═══════════════════════════════════════════════════════
 def create_session():
     url  = BASE_URL + '/api/v1/session'
     hdrs = {'X-CAP-API-KEY': API_KEY, 'Content-Type': 'application/json'}
-    body = {'identifier': EMAIL, 'password': PASSWORD, 'encryptedPassword': False}
+    body = {'identifier': EMAIL, 'password': PASSWORD,
+            'encryptedPassword': False}
     try:
         r = requests.post(url, headers=hdrs, json=body, timeout=15)
         if r.status_code == 200:
             session_headers.update({
                 'X-SECURITY-TOKEN': r.headers.get('X-SECURITY-TOKEN'),
                 'CST':              r.headers.get('CST'),
-                'Content-Type':     'application/json'
+                'Content-Type':     'application/json',
             })
             log('✅ Session OK')
             return True
-        log('❌ Session FAILED: ' + r.text[:100])
+        log(f'❌ Session FAILED [{r.status_code}]: {r.text[:100]}')
     except Exception as ex:
-        log('❌ Session ERROR: ' + str(ex))
+        log(f'❌ Session ERROR: {ex}')
     return False
 
 def ping_session():
-    try:
-        requests.get(BASE_URL + '/api/v1/ping',
-                     headers=session_headers, timeout=10)
-    except:
-        pass
+    _get('/api/v1/ping')
 
 def get_balance():
     global ACCOUNT_BALANCE
-    try:
-        r = requests.get(BASE_URL + '/api/v1/accounts',
-                         headers=session_headers, timeout=10)
-        if r.status_code == 200:
-            accs = r.json().get('accounts', [])
-            if accs:
-                ACCOUNT_BALANCE = float(
-                    accs[0].get('balance', {}).get('available', ACCOUNT_BALANCE)
-                )
-                log(f'💰 Balance: ${round(ACCOUNT_BALANCE, 2)}')
-    except Exception as ex:
-        log('Balance ERROR: ' + str(ex))
+    r = _get('/api/v1/accounts')
+    if r and r.status_code == 200:
+        accs = r.json().get('accounts', [])
+        if accs:
+            ACCOUNT_BALANCE = float(
+                accs[0].get('balance', {}).get('available', ACCOUNT_BALANCE)
+            )
+            log(f'💰 Balance: ${round(ACCOUNT_BALANCE, 2)}')
 
 def get_open_positions():
-    try:
-        r = requests.get(BASE_URL + '/api/v1/positions',
-                         headers=session_headers, timeout=10)
-        if r.status_code == 200:
-            return r.json().get('positions', [])
-    except Exception as ex:
-        log('Positions ERROR: ' + str(ex))
+    r = _get('/api/v1/positions')
+    if r and r.status_code == 200:
+        return r.json().get('positions', [])
     return []
 
-def get_market_info(epic):
-    try:
-        r = requests.get(BASE_URL + '/api/v1/markets/' + epic,
-                         headers=session_headers, timeout=10)
-        if r.status_code == 200:
-            data       = r.json()
-            snap       = data.get('snapshot', {})
-            instrument = data.get('instrument', {})
-            dealing    = data.get('dealingRules', {})
-            bid        = snap.get('bid', 0)
-            ask        = snap.get('offer', 0)
-            spread     = round(ask - bid, 5)
-            cs         = float(instrument.get('contractSize', 100))
-            min_size   = float(
-                dealing.get('minDealSize', {}).get('value', 0.1)
-            )
-            return bid, ask, spread, cs, min_size
-    except Exception as ex:
-        log(f'market_info ERROR ({epic}): {ex}')
-    return 0, 0, 0, 100, 0.1
+# ── [1] احترافي: يجلب contractSize + min/max size من API ──
+def get_instrument_meta(epic):
+    """
+    Cache 5 دقائق.
+    Returns: (bid, ask, spread, contractSize, min_size, max_size)
+    """
+    now    = time.time()
+    cached = _meta_cache.get(epic)
+    if cached and (now - cached['ts']) < 300:
+        return cached['data']
 
-# ================================================
-# 📡 TELEGRAM
-# ================================================
+    r = _get(f'/api/v1/markets/{epic}')
+    if not r or r.status_code != 200:
+        return 0.0, 0.0, 0.0, 100.0, 0.1, 1000.0
+
+    data       = r.json()
+    snap       = data.get('snapshot',     {})
+    instrument = data.get('instrument',   {})
+    dealing    = data.get('dealingRules', {})
+
+    bid    = float(snap.get('bid',   0) or 0)
+    ask    = float(snap.get('offer', 0) or 0)
+    spread = round(ask - bid, 5)
+    cs     = float(instrument.get('contractSize', 100) or 100)
+    min_sz = float((dealing.get('minDealSize') or {}).get('value', 0.1)  or 0.1)
+    max_sz = float((dealing.get('maxDealSize') or {}).get('value', 1000) or 1000)
+
+    result = (bid, ask, spread, cs, min_sz, max_sz)
+    _meta_cache[epic] = {'ts': now, 'data': result}
+    return result
+
+
+# ═══════════════════════════════════════════════════════
+# TELEGRAM
+# ═══════════════════════════════════════════════════════
 def tg(text):
-    if not TG_TOKEN or TG_TOKEN == 'YOUR_TG_TOKEN':
+    if not TG_TOKEN:
         return
     try:
         requests.post(
             f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            data={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': 'Markdown'},
+            data={'chat_id': TG_CHAT_ID, 'text': text,
+                  'parse_mode': 'Markdown'},
             timeout=10
         )
-    except:
+    except Exception:
         pass
 
-def tg_signal(pair, direction, entry, sl, tp, atr, size):
-    icon = '🟢' if direction == 'BUY' else '🔴'
+def tg_signal(sig):
+    icon = '🟢' if sig['direction'] == 'BUY' else '🔴'
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
+    rr   = round(TP_ATR_MULT / SL_ATR_MULT, 1)
     nl   = '\n'
     tg(
-        f'{icon} *{pair} {direction}* [{mode}]{nl}'
-        f'Entry: `{entry}` | SL: `{sl}` | TP: `{tp}`{nl}'
-        f'ATR: `{atr}` | Size: `{size}`{nl}'
-        f'TF: `{STRATEGY_TF}` | Method: `{SLOPE_METHOD}`{nl}'
+        f'{icon} *{sig["pair"]} {sig["direction"]}* [{mode}]{nl}'
+        f'Entry: `{sig["entry"]}` | SL: `{sig["sl"]}` | TP: `{sig["tp"]}`{nl}'
+        f'R:R: `1:{rr}` | Size: `{sig["size"]}`{nl}'
+        f'ATR: `{sig["atr"]}` | Spread: `{sig["spread"]}`{nl}'
+        f'TF: `{STRATEGY_TF}` | Trail: `{TRAIL_MODE}`{nl}'
         f'_{utc_now()}_'
     )
 
 def tg_result(pair, direction, status, ref, error=''):
     icon = '✅' if status in ('ACCEPTED', 'SUCCESS') else '❌'
-    mode = 'DEMO' if DEMO_MODE else 'LIVE'
     nl   = '\n'
-    msg  = f'{icon} *{pair} {direction} {status}* [{mode}]{nl}Ref: `{ref}`'
+    msg  = f'{icon} *{pair} {direction} {status}*{nl}Ref: `{ref}`'
     if error:
-        msg += f'{nl}Err: `{error}`'
+        msg += f'{nl}Err: `{error[:80]}`'
     tg(msg)
 
-# ================================================
-# 📈 CANDLES
-# ================================================
+def tg_mgmt(pair, action, old_sl, new_sl):
+    icons = {'BE': '🔒', 'TRAIL': '📈'}
+    tg(f'{icons.get(action,"⚙️")} *{action}* {pair}'
+       f'\nSL: `{old_sl}` → `{new_sl}`')
+
+
+# ═══════════════════════════════════════════════════════
+# CANDLES
+# ═══════════════════════════════════════════════════════
 def fetch_candles(epic, resolution, count=300):
+    r = _get(f'/api/v1/prices/{epic}',
+             params={'resolution': resolution, 'max': count})
+    if not r or r.status_code != 200:
+        log(f'  fetch_candles FAILED ({epic})')
+        return pd.DataFrame()
+    prices = r.json().get('prices', [])
+    if len(prices) < LENGTH * 3 + ATR_PERIOD:
+        return pd.DataFrame()
     try:
-        r = requests.get(
-            BASE_URL + '/api/v1/prices/' + epic,
-            headers=session_headers,
-            params={'resolution': resolution, 'max': count},
-            timeout=20
-        )
-        if r.status_code == 429:
-            time.sleep(5)
-            r = requests.get(
-                BASE_URL + '/api/v1/prices/' + epic,
-                headers=session_headers,
-                params={'resolution': resolution, 'max': count},
-                timeout=20
-            )
-        if r.status_code != 200:
-            return pd.DataFrame()
-        prices = r.json().get('prices', [])
-        if len(prices) < LENGTH * 3:
-            return pd.DataFrame()
         rows = [{
             'time':  p['snapshotTimeUTC'],
             'open':  (p['openPrice']['bid']  + p['openPrice']['ask'])  / 2,
@@ -298,16 +343,17 @@ def fetch_candles(epic, resolution, count=300):
             'low':   (p['lowPrice']['bid']   + p['lowPrice']['ask'])   / 2,
             'close': (p['closePrice']['bid'] + p['closePrice']['ask']) / 2,
         } for p in prices]
-        df = pd.DataFrame(rows)
-        df['time'] = pd.to_datetime(df['time'], utc=True)
-        return df.sort_values('time').reset_index(drop=True)
-    except Exception as ex:
-        log(f'fetch_candles ERROR ({epic}): {ex}')
+    except (KeyError, TypeError) as ex:
+        log(f'  candle parse ERROR: {ex}')
         return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df['time'] = pd.to_datetime(df['time'], utc=True)
+    return df.sort_values('time').reset_index(drop=True)
 
-# ================================================
-# 📐 INDICATORS
-# ================================================
+
+# ═══════════════════════════════════════════════════════
+# INDICATORS
+# ═══════════════════════════════════════════════════════
 def calc_atr_series(df, period=14):
     tr = pd.concat([
         df['high'] - df['low'],
@@ -317,124 +363,132 @@ def calc_atr_series(df, period=14):
     return tr.ewm(span=period, adjust=False).mean()
 
 def find_pivot_high(high_series, length):
-    n      = len(high_series)
-    pivots = [np.nan] * n
+    n, pivots = len(high_series), [np.nan] * len(high_series)
     for i in range(length, n - length):
-        window = high_series.iloc[i - length: i + length + 1]
-        if high_series.iloc[i] == window.max():
+        if high_series.iloc[i] == high_series.iloc[i-length: i+length+1].max():
             pivots[i] = high_series.iloc[i]
     return pivots
 
 def find_pivot_low(low_series, length):
-    n      = len(low_series)
-    pivots = [np.nan] * n
+    n, pivots = len(low_series), [np.nan] * len(low_series)
     for i in range(length, n - length):
-        window = low_series.iloc[i - length: i + length + 1]
-        if low_series.iloc[i] == window.min():
+        if low_series.iloc[i] == low_series.iloc[i-length: i+length+1].min():
             pivots[i] = low_series.iloc[i]
     return pivots
 
 def get_slope_val(method, df, idx, length, mult, atr_series):
     atr_val = float(atr_series.iloc[idx]) if not np.isnan(atr_series.iloc[idx]) else 1e-6
-
-    if method == 'ATR':
-        return atr_val * mult / length
-
-    elif method == 'Stdev':
+    if method == 'Stdev':
         start = max(0, idx - length + 1)
         stdev = df['close'].iloc[start:idx+1].std()
-        if np.isnan(stdev) or stdev == 0:
-            return atr_val * mult / length
-        return stdev * mult / length
-
+        return (stdev * mult / length) if (not np.isnan(stdev) and stdev > 0) \
+               else (atr_val * mult / length)
     elif method == 'Linreg':
         start = max(0, idx - length + 1)
         y = df['close'].iloc[start:idx+1].values
-        if len(y) < 2:
-            return atr_val * mult / length
-        x = np.arange(len(y))
-        slope = np.polyfit(x, y, 1)[0]
-        return abs(slope) * mult
-
+        if len(y) >= 2:
+            slope = np.polyfit(np.arange(len(y)), y, 1)[0]
+            return abs(slope) * mult
     return atr_val * mult / length
 
 def tl_value(anchor_idx, anchor_val, slope, goes_up, cur_idx):
     bars = cur_idx - anchor_idx
     return anchor_val + slope * bars if goes_up else anchor_val - slope * bars
 
-# ================================================
-# 🔍 SIGNAL DETECTION
-# ================================================
+
+# ═══════════════════════════════════════════════════════
+# [1] POSITION SIZING — احترافي
+# ═══════════════════════════════════════════════════════
+def calc_position_size(risk_usd, sl_dist, contract_size, min_size, max_size):
+    """
+    الصيغة الصحيحة:
+    size = risk_usd / (sl_dist × contractSize)
+
+    مثال GOLD  (cs=100):  $10 / (5 × 100)    = 0.02 lot
+    مثال EURUSD(cs=100k): $10 / (0.005 × 1e5) = 0.02 lot
+    """
+    if sl_dist <= 0 or contract_size <= 0:
+        return min_size
+    size = round(risk_usd / (sl_dist * contract_size), 2)
+    # clamp بين حدود API
+    return max(min(size, max_size), min_size)
+
+
+# ═══════════════════════════════════════════════════════
+# SIGNAL DETECTION
+# ═══════════════════════════════════════════════════════
 def check_signal(pair_name, config):
     epic       = config['epic']
     allow_buy  = config['allow_buy']
     allow_sell = config['allow_sell']
-
     if not allow_buy and not allow_sell:
         return None
 
     df = fetch_candles(epic, STRATEGY_TF, CANDLES_COUNT)
-    if df.empty or len(df) < LENGTH * 3 + ATR_PERIOD:
-        log(f'  {pair_name}: بيانات غير كافية')
+    if df.empty:
         return None
 
-    # احسب المؤشرات
-    atr_s  = calc_atr_series(df, ATR_PERIOD)
-    ph_arr = find_pivot_high(df['high'], LENGTH)
-    pl_arr = find_pivot_low(df['low'],  LENGTH)
+    # نتجاهل الشمعة الأخيرة (غير مكتملة)
+    df_c  = df.iloc[:-1].copy().reset_index(drop=True)
+    atr_s = calc_atr_series(df_c, ATR_PERIOD)
 
-    # ابحث في آخر الشموع المكتملة (نتجنب الشمعة الأخيرة غير المكتملة)
-    n         = len(df) - 1   # نتجاهل الشمعة الحالية
+    ph_arr = find_pivot_high(df_c['high'], LENGTH)
+    pl_arr = find_pivot_low(df_c['low'],   LENGTH)
+
+    n         = len(df_c)
     upper_tl  = None
     lower_tl  = None
-    signal    = None
 
-    # بنِ خطوط الترند وابحث عن كسر في آخر شمعة مكتملة
     for i in range(LENGTH + ATR_PERIOD, n):
-        ph = ph_arr[i]
-        pl = pl_arr[i]
         atr_i = float(atr_s.iloc[i])
         if np.isnan(atr_i) or atr_i <= 0:
             continue
-
+        ph = ph_arr[i]
+        pl = pl_arr[i]
         if not np.isnan(ph):
-            slope    = get_slope_val(SLOPE_METHOD, df, i, LENGTH, SLOPE_MULT, atr_s)
-            upper_tl = (i, float(ph), slope)   # resistance → goes down
-
+            slope    = get_slope_val(SLOPE_METHOD, df_c, i, LENGTH, SLOPE_MULT, atr_s)
+            upper_tl = (i, float(ph), slope)
         if not np.isnan(pl):
-            slope    = get_slope_val(SLOPE_METHOD, df, i, LENGTH, SLOPE_MULT, atr_s)
-            lower_tl = (i, float(pl), slope)   # support → goes up
+            slope    = get_slope_val(SLOPE_METHOD, df_c, i, LENGTH, SLOPE_MULT, atr_s)
+            lower_tl = (i, float(pl), slope)
 
-    # تحقق من الكسر في الشمعة المكتملة الأخيرة (n-1)
     last_idx   = n - 1
-    last_close = float(df['close'].iloc[last_idx])
+    last_close = float(df_c['close'].iloc[last_idx])
     last_atr   = float(atr_s.iloc[last_idx])
 
     if np.isnan(last_atr) or last_atr <= 0:
         return None
 
-    if allow_buy and upper_tl is not None:
-        anchor_idx, anchor_val, slope = upper_tl
-        if anchor_idx < last_idx - 1:
-            u_val = tl_value(anchor_idx, anchor_val, slope, False, last_idx)
-            if last_close > u_val:
-                signal = 'BUY'
-                log(f'  {pair_name}: 🟢 BUY breakout | close={last_close:.5f} > TL={u_val:.5f}')
-
-    if allow_sell and signal is None and lower_tl is not None:
-        anchor_idx, anchor_val, slope = lower_tl
-        if anchor_idx < last_idx - 1:
-            l_val = tl_value(anchor_idx, anchor_val, slope, True, last_idx)
-            if last_close < l_val:
-                signal = 'SELL'
-                log(f'  {pair_name}: 🔴 SELL breakout | close={last_close:.5f} < TL={l_val:.5f}')
-
-    if not signal:
+    # [1] جلب بيانات السوق (مع cache)
+    bid, ask, spread, cs, min_sz, max_sz = get_instrument_meta(epic)
+    if bid <= 0 or ask <= 0:
         return None
 
-    # SL/TP بناءً على ATR
-    bid, ask, spread, cs, min_size = get_market_info(epic)
-    if bid <= 0:
+    # [5] Spread guard
+    spread_ratio = spread / last_atr
+    if spread_ratio > MAX_SPREAD_ATR_RATIO:
+        log(f'  {pair_name}: spread {spread_ratio:.1%} > حد {MAX_SPREAD_ATR_RATIO:.1%} — تخطّي')
+        return None
+
+    signal = None
+
+    if allow_buy and upper_tl is not None:
+        ai, av, sl_v = upper_tl
+        if ai < last_idx - 1:
+            u_val = tl_value(ai, av, sl_v, False, last_idx)
+            if last_close > u_val:
+                signal = 'BUY'
+                log(f'  {pair_name}: 🟢 BUY | close={last_close:.5f} > TL={u_val:.5f}')
+
+    if allow_sell and signal is None and lower_tl is not None:
+        ai, av, sl_v = lower_tl
+        if ai < last_idx - 1:
+            l_val = tl_value(ai, av, sl_v, True, last_idx)
+            if last_close < l_val:
+                signal = 'SELL'
+                log(f'  {pair_name}: 🔴 SELL | close={last_close:.5f} < TL={l_val:.5f}')
+
+    if not signal:
         return None
 
     entry = ask if signal == 'BUY' else bid
@@ -447,16 +501,19 @@ def check_signal(pair_name, config):
         tp = round(entry - TP_ATR_MULT * last_atr, 5)
 
     sl_dist = abs(entry - sl)
-    if sl_dist <= 0:
+    if sl_dist < last_atr * 0.1:
+        log(f'  {pair_name}: SL صغير جداً — تخطّي')
         return None
 
-    # حساب الحجم
-    if config['size_override']:
-        size = config['size_override']
+    # [1] حساب الحجم الاحترافي
+    if config.get('size_override') is not None:
+        size = max(min(float(config['size_override']), max_sz), min_sz)
     else:
         risk_usd = ACCOUNT_BALANCE * RISK_PERCENT
-        size     = max(round(risk_usd / sl_dist, 2), min_size)
-        size     = min(size, 10.0)   # حد أقصى للأمان
+        size     = calc_position_size(risk_usd, sl_dist, cs, min_sz, max_sz)
+
+    log(f'  {pair_name}: size={size} | risk≈${round(size*sl_dist*cs,2)}'
+        f' | cs={cs} | sl_dist={sl_dist:.5f}')
 
     return {
         'pair':      pair_name,
@@ -470,54 +527,160 @@ def check_signal(pair_name, config):
         'spread':    round(spread, 5),
     }
 
-# ================================================
-# 📤 EXECUTE ORDER
-# ================================================
+
+# ═══════════════════════════════════════════════════════
+# ORDER EXECUTION
+# ═══════════════════════════════════════════════════════
 def execute_order(sig):
-    direction = sig['direction']
-    epic      = sig['epic']
     body = {
-        'epic':           epic,
-        'direction':      direction,
+        'epic':           sig['epic'],
+        'direction':      sig['direction'],
         'size':           sig['size'],
         'guaranteedStop': False,
         'trailingStop':   False,
         'stopLevel':      sig['sl'],
         'profitLevel':    sig['tp'],
     }
+    log(f'  📤 {sig["pair"]} {sig["direction"]} | '
+        f'entry≈{sig["entry"]} SL={sig["sl"]} TP={sig["tp"]} size={sig["size"]}')
 
-    log(f'  📤 ORDER {sig["pair"]} {direction} | entry≈{sig["entry"]}'
-        f' SL={sig["sl"]} TP={sig["tp"]} size={sig["size"]}')
+    r = _post('/api/v1/positions', body)
+    if not r:
+        tg_result(sig['pair'], sig['direction'], 'ERROR', 'N/A', 'no response')
+        return 'ERROR', 'no response'
 
-    try:
-        r    = requests.post(BASE_URL + '/api/v1/positions',
-                             headers=session_headers, json=body, timeout=15)
-        data = r.json()
-        log(f'  RESP [{r.status_code}]: {json.dumps(data)[:200]}')
+    data = r.json()
+    log(f'  RESP [{r.status_code}]: {json.dumps(data)[:200]}')
 
-        if r.status_code == 200:
-            deal_ref = data.get('dealReference', 'N/A')
-            time.sleep(2)
-            confirm  = requests.get(
-                BASE_URL + '/api/v1/confirms/' + deal_ref,
-                headers=session_headers, timeout=10
-            ).json()
-            status = confirm.get('dealStatus', 'UNKNOWN')
-            reason = confirm.get('reason', '')
-            tg_result(sig['pair'], direction, status, deal_ref, reason)
+    if r.status_code == 200:
+        deal_ref = data.get('dealReference', 'N/A')
+        time.sleep(2)
+        rc = _get(f'/api/v1/confirms/{deal_ref}')
+        if rc and rc.status_code == 200:
+            confirm = rc.json()
+            status  = confirm.get('dealStatus', 'UNKNOWN')
+            reason  = confirm.get('reason',     '')
+            tg_result(sig['pair'], sig['direction'], status, deal_ref, reason)
             return status, deal_ref
-        else:
-            err = data.get('errorCode', str(data)[:80])
-            tg_result(sig['pair'], direction, 'FAILED', 'N/A', err)
-            return 'FAILED', err
+        return 'UNKNOWN', deal_ref
+    else:
+        err = data.get('errorCode', str(data)[:80])
+        tg_result(sig['pair'], sig['direction'], 'FAILED', 'N/A', err)
+        return 'FAILED', err
 
-    except Exception as ex:
-        log(f'  EXCEPTION: {ex}')
-        return 'ERROR', str(ex)
 
-# ================================================
-# 🔄 SCAN LOOP
-# ================================================
+# ═══════════════════════════════════════════════════════
+# [2] BREAK-EVEN + [3] TRAILING STOP
+# ═══════════════════════════════════════════════════════
+def _swing_sl(df_c, direction, lookback):
+    """
+    [3] STRUCTURE trailing:
+    BUY  → SL = أدنى Low في آخر N شمعة
+    SELL → SL = أعلى High في آخر N شمعة
+    """
+    if len(df_c) < lookback:
+        return None
+    recent = df_c.iloc[-lookback:]
+    return (round(float(recent['low'].min()),  5) if direction == 'BUY'
+            else round(float(recent['high'].max()), 5))
+
+def manage_open_positions(positions):
+    """
+    يُشغَّل على كل صفقة مفتوحة:
+    1. Break-even عند BE_TRIGGER_R
+    2. Trailing Stop عند TRAIL_TRIGGER_R
+    SL لا يتحرك للخلف أبداً.
+    """
+    for pos in positions:
+        try:
+            p         = pos.get('position', {})
+            deal_id   = p.get('dealId',    '')
+            direction = p.get('direction', '')
+            entry     = float(p.get('level',     0) or 0)
+            cur_sl    = float(p.get('stopLevel', 0) or 0)
+            epic      = pos.get('market', {}).get('epic', '')
+
+            if not deal_id or not entry or not epic:
+                continue
+
+            # السعر الحالي
+            bid, ask, _, _, _, _ = get_instrument_meta(epic)
+            price = bid if direction == 'BUY' else ask
+            if not price:
+                continue
+
+            sl_dist = abs(entry - cur_sl)
+            if sl_dist <= 0:
+                continue
+
+            profit_r = ((price - entry) if direction == 'BUY'
+                        else (entry - price)) / sl_dist
+
+            # جلب شموع للـ trailing
+            df   = fetch_candles(epic, STRATEGY_TF, 60)
+            if df.empty:
+                continue
+            df_c    = df.iloc[:-1].copy().reset_index(drop=True)
+            atr_s   = calc_atr_series(df_c, ATR_PERIOD)
+            cur_atr = float(atr_s.iloc[-1])
+
+            new_sl = None
+
+            # ── [2] BREAK-EVEN ──────────────────────────
+            # ينتقل SL إلى نقطة الدخول بالضبط عند BE_TRIGGER_R
+            if profit_r >= BE_TRIGGER_R:
+                be_sl = round(entry, 5)
+                if direction == 'BUY'  and cur_sl < be_sl:
+                    new_sl = be_sl
+                    log(f'  🔒 BE {deal_id}: {cur_sl} → {new_sl}')
+                    tg_mgmt(epic, 'BE', cur_sl, new_sl)
+                elif direction == 'SELL' and cur_sl > be_sl:
+                    new_sl = be_sl
+                    log(f'  🔒 BE {deal_id}: {cur_sl} → {new_sl}')
+                    tg_mgmt(epic, 'BE', cur_sl, new_sl)
+
+            # ── [3] TRAILING STOP ────────────────────────
+            if profit_r >= TRAIL_TRIGGER_R and cur_atr > 0:
+                base_sl = new_sl or cur_sl   # لا نتراجع عن BE إذا فُعّل
+
+                if TRAIL_MODE == 'STRUCTURE':
+                    # خلف آخر سوينغ لو
+                    swing = _swing_sl(df_c, direction, SWING_LOOKBACK)
+                    if swing is not None:
+                        better = (swing > base_sl if direction == 'BUY'
+                                  else swing < base_sl)
+                        if better:
+                            new_sl = swing
+                            log(f'  📈 TRAIL(STRUCT) {deal_id}: → {new_sl}')
+                            tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
+                else:
+                    # ATR trailing
+                    if direction == 'BUY':
+                        atr_sl = round(price - TRAIL_ATR_MULT * cur_atr, 5)
+                        if atr_sl > base_sl + 1e-6:
+                            new_sl = atr_sl
+                            log(f'  📈 TRAIL(ATR) {deal_id}: → {new_sl}')
+                            tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
+                    else:
+                        atr_sl = round(price + TRAIL_ATR_MULT * cur_atr, 5)
+                        if atr_sl < base_sl - 1e-6:
+                            new_sl = atr_sl
+                            log(f'  📈 TRAIL(ATR) {deal_id}: → {new_sl}')
+                            tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
+
+            # تحديث SL في API
+            if new_sl is not None:
+                r = _put(f'/api/v1/positions/{deal_id}', {'stopLevel': new_sl})
+                if r:
+                    log(f'  SL UPDATE [{r.status_code}]')
+
+        except Exception as ex:
+            log(f'  manage_positions ERROR: {ex}')
+
+
+# ═══════════════════════════════════════════════════════
+# SCAN
+# ═══════════════════════════════════════════════════════
 def run_scan():
     now = datetime.now(timezone.utc)
     if now.weekday() >= 5:
@@ -532,23 +695,25 @@ def run_scan():
     open_pos = get_open_positions()
     log(f'  صفقات مفتوحة: {len(open_pos)} / {MAX_OPEN_TRADES}')
 
+    # [2][3] إدارة الصفقات المفتوحة أولاً
+    if open_pos:
+        manage_open_positions(open_pos)
+
     if len(open_pos) >= MAX_OPEN_TRADES:
-        log('  ⏸  وصلنا الحد الأقصى للصفقات')
+        log('  ⏸  الحد الأقصى للصفقات')
         return
 
     ts_key = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
 
     for pair_name, config in PAIRS.items():
-        # فحص الخسائر المتتالية لكل زوج
         consec = db_consec_losses(pair_name)
         if consec >= MAX_CONSECUTIVE_LOSS:
             log(f'  {pair_name}: ⚠️  {consec} خسائر متتالية — تخطّي')
             continue
 
-        # منع الإشارة المكررة في نفس الساعة
         key = f'{pair_name}_{ts_key}'
         if db_is_dup(key):
-            log(f'  {pair_name}: ⏸  إشارة مكررة ({key})')
+            log(f'  {pair_name}: ⏸  مكرر ({key})')
             continue
 
         log(f'  {pair_name}: فحص ...')
@@ -558,52 +723,49 @@ def run_scan():
             log(f'  {pair_name}: لا إشارة')
             continue
 
-        # سجّل الإشارة
         db_save(key, pair_name, sig['direction'],
                 sig['entry'], sig['sl'], sig['tp'],
                 sig['atr'], sig['size'])
+        tg_signal(sig)
 
-        tg_signal(pair_name, sig['direction'],
-                  sig['entry'], sig['sl'], sig['tp'],
-                  sig['atr'], sig['size'])
-
-        # تنفيذ
         status, ref = execute_order(sig)
         db_update(key, status)
         log(f'  {pair_name}: {status} | {ref}')
 
-        # لا ندخل أكثر من صفقة واحدة لكل scan إذا وصلنا الحد
         open_pos = get_open_positions()
         if len(open_pos) >= MAX_OPEN_TRADES:
             break
+        time.sleep(2)
 
-        time.sleep(2)   # تأخير بسيط بين الأزواج
 
-# ================================================
-# 🚀 BOT ENTRY
-# ================================================
+# ═══════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════
 def start_bot():
     db_init()
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
     nl   = '\n'
 
     print('=' * 55, flush=True)
-    print(f'  Trendlines Breaks Bot [{mode}]', flush=True)
-    print(f'  TF     : {STRATEGY_TF}', flush=True)
-    print(f'  Method : {SLOPE_METHOD}', flush=True)
-    print(f'  Length : {LENGTH} | Slope: {SLOPE_MULT}', flush=True)
-    print(f'  SL/TP  : {SL_ATR_MULT}/{TP_ATR_MULT} × ATR', flush=True)
-    print(f'  Pairs  :', flush=True)
+    print(f'  Trendlines Breaks Bot v2 [{mode}]', flush=True)
+    print(f'  TF       : {STRATEGY_TF}',          flush=True)
+    print(f'  Method   : {SLOPE_METHOD}',          flush=True)
+    print(f'  Length   : {LENGTH}',                flush=True)
+    print(f'  SL/TP    : {SL_ATR_MULT}/{TP_ATR_MULT}×ATR', flush=True)
+    print(f'  BE       : {BE_TRIGGER_R}R → entry',flush=True)
+    print(f'  Trail    : {TRAIL_MODE} @ {TRAIL_TRIGGER_R}R', flush=True)
+    print(f'  Spread   : max {MAX_SPREAD_ATR_RATIO:.0%} ATR', flush=True)
     for pn, pc in PAIRS.items():
         b = '✅' if pc['allow_buy']  else '❌'
         s = '✅' if pc['allow_sell'] else '❌'
-        print(f'    {pn}: BUY={b} SELL={s}', flush=True)
+        print(f'  {pn:<8}: BUY={b} SELL={s}', flush=True)
     print('=' * 55, flush=True)
 
     tg(
-        f'🚀 *Trendlines Breaks Bot* [{mode}]{nl}'
+        f'🚀 *TL Breaks Bot v2* [{mode}]{nl}'
         f'TF: `{STRATEGY_TF}` | Method: `{SLOPE_METHOD}`{nl}'
-        f'Length: `{LENGTH}` | SL/TP: `{SL_ATR_MULT}/{TP_ATR_MULT}×ATR`{nl}'
+        f'SL/TP: `{SL_ATR_MULT}/{TP_ATR_MULT}×ATR`{nl}'
+        f'BE: `{BE_TRIGGER_R}R` | Trail: `{TRAIL_MODE}@{TRAIL_TRIGGER_R}R`{nl}'
         + ''.join(
             f'{pn}: BUY={"✅" if pc["allow_buy"] else "❌"} '
             f'SELL={"✅" if pc["allow_sell"] else "❌"}{nl}'
@@ -621,14 +783,12 @@ def start_bot():
                     continue
             else:
                 ping_session()
-
             session_age = (session_age + 1) % 25
-
             run_scan()
 
         except KeyboardInterrupt:
             log('🛑 Bot stopped')
-            tg('🛑 Trendlines Breaks Bot stopped')
+            tg('🛑 TL Breaks Bot v2 stopped')
             break
         except Exception as ex:
             log(f'LOOP ERROR: {ex}')
