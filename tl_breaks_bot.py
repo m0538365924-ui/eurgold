@@ -836,7 +836,7 @@ def run_scan():
         return
 
     # ── [8] فلتر الجلسة: 07:00 – 17:00 UTC (10:00 – 20:00 بتوقيتك) ──
-    if not (7 <= now.hour < 17):
+    if not (3 <= now.hour < 20):
         log(f'⏸  خارج جلسة التداول (UTC {now.hour:02d}:00 | يبدأ 07:00 وينتهي 17:00)')
         return
 
