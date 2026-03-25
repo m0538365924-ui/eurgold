@@ -52,7 +52,7 @@ DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 PAIRS = {
     'GOLD': {
         'epic':          'GOLD',
-        'allow_buy':     os.getenv('GOLD_BUY',  'false').lower() == 'true',
+        'allow_buy':     os.getenv('GOLD_BUY',  'true').lower() == 'true',
         'allow_sell':    os.getenv('GOLD_SELL', 'true').lower()  == 'true',
         'size_override': None,
     },
