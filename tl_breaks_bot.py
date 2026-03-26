@@ -187,7 +187,7 @@ def log(msg):
 # [8] SESSION FILTER
 # ═══════════════════════════════════════════════════════
 def is_trading_session():
-    return 9 <= datetime.now(timezone.utc).hour < 14
+    return 7 <= datetime.now(timezone.utc).hour < 16
 
 
 # ═══════════════════════════════════════════════════════
