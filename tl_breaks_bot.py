@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==========================================================
-# tl_breaks_bot.py — Trendlines with Breaks Bot (v5)
-# GOLD + EURUSD | Capital.com API | Railway Ready
-# ==========================================================
-#  [1]  Position Sizing          → risk / (sl_dist × contractSize)
-#  [2]  Break-even               → SL ينتقل لنقطة الدخول عند 1R
-#  [3]  Trailing Stop            → ATR أو Structure
-#  [4]  Spread guard             → يتجاهل إشارة إذا spread كبير
-#  [5]  CSV Logger               → يسجل كل صفقة مع إحصائيات
-#  [6]  Daily Summary            → ملخص يومي على Telegram
-#  [7]  Railway Ready            → لا ملفات محلية حساسة
-#  [8]  Session Filter ذكي       → London/NY Overlap (09-14 UTC)
-#  [9]  News Filter              → يتوقف قبل/بعد الأخبار القوية
-#  [10] EMA 200 Trend Filter     → BUY فوق EMA | SELL تحت EMA
-#  [11] Session Risk Multiplier  → لوت أكبر في الجلسة القوية
-#  [12] Breakout Confirmation    → إغلاق شمعتين فوق/تحت الترند
-#  [13] RSI Momentum Filter      → BUY>50 | SELL<50
-#  [14] Dynamic SL/TP            → يتكيف مع ATR Regime
-#  [15] Market Structure Filter  → HH/HL أو LH/LL
-#  [16] Smart Risk Multiplier    → يوقف المضاعف عند الخسائر
-# ★[17] Equity Protection        → حد خسارة يومي + أسبوعي
-# ★[18] Smart Risk by Perf       → يرفع/يخفض المخاطرة حسب الأداء
-# ★[19] Partial Take Profit      → يغلق جزءاً عند TP1 ويتبع الباقي
+# multi_pairs_bot_pure_supertrend.py
+# ✅ Supertrend (10,3 | ATR: RMA) + EMA 20
+# ✅ فريم 15 دقيقة - النسخة المحسنة
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
@@ -34,7 +15,6 @@ from threading import Lock
 from dotenv import load_dotenv
 
 load_dotenv()
-
 
 # ═══════════════════════════════════════════════════════
 # CONFIG
@@ -48,603 +28,565 @@ TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
 BASE_URL  = 'https://api-capital.backend-capital.com'
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 
-# ── Pairs ──
 PAIRS = {
-    'GOLD': {
-        'epic':          'GOLD',
-        'allow_buy':     os.getenv('GOLD_BUY',  'true').lower() == 'true',
-        'allow_sell':    os.getenv('GOLD_SELL', 'true').lower()  == 'true',
-        'size_override': None,
-    },
-    'EURUSD': {
-        'epic':          'EURUSD',
-        'allow_buy':     os.getenv('EURUSD_BUY',  'true').lower() == 'true',
-        'allow_sell':    os.getenv('EURUSD_SELL', 'true').lower() == 'true',
-        'size_override': None,
-    },
+    'GOLD':   {'epic': 'GOLD',   'allow_buy': True, 'allow_sell': True, 'size_override': None},
+    'BTCUSD': {'epic': 'BTCUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
+    'EURUSD': {'epic': 'EURUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
+    'GBPUSD': {'epic': 'GBPUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
+    'US100':  {'epic': 'US100',  'allow_buy': True, 'allow_sell': True, 'size_override': None},
+    'US500':  {'epic': 'US500',  'allow_buy': True, 'allow_sell': True, 'size_override': None},
 }
 
-# ── Timeframe ──
-STRATEGY_TF   = os.getenv('STRATEGY_TF', 'MINUTE_15')
-CANDLES_COUNT = 300
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
+STRATEGY_TF   = 'MINUTE_15'
+CANDLES_COUNT = 500
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '180'))
 
-# ── Strategy ──
-LENGTH       = int(os.getenv('LENGTH',       '10'))
-SLOPE_MULT   = float(os.getenv('SLOPE_MULT', '1.0'))
-SLOPE_METHOD = os.getenv('SLOPE_METHOD',     'ATR')
-ATR_PERIOD   = 14
-SL_ATR_MULT  = float(os.getenv('SL_ATR_MULT', '1.5'))
-TP_ATR_MULT  = float(os.getenv('TP_ATR_MULT', '2.5'))
+# ═══════════════════════════════════════════════════════
+# ✅ SUPERTREND SETTINGS
+# Period=10, Multiplier=3.0, ATR Method=RMA (default)
+# ═══════════════════════════════════════════════════════
+SUPERTREND_PERIOD = int(os.getenv('SUPERTREND_PERIOD', '10'))
+SUPERTREND_MULT   = float(os.getenv('SUPERTREND_MULT', '3.0'))
+ATR_METHOD        = os.getenv('ATR_METHOD', 'RMA')  # RMA (default) أو SMA
 
-# ── [10] EMA ──
-EMA_PERIOD = int(os.getenv('EMA_PERIOD', '200'))
+EMA_PERIOD     = 20
+ATR_PERIOD     = 14
+SL_ATR_MULT    = 1.5
+TP_ATR_MULT    = 3.0
+SPREAD_ATR_MAX = 0.25
 
-# ── [13] RSI ──
-RSI_PERIOD   = int(os.getenv('RSI_PERIOD', '14'))
-RSI_BUY_MIN  = float(os.getenv('RSI_BUY',  '50'))
-RSI_SELL_MAX = float(os.getenv('RSI_SELL', '50'))
-RSI_OB       = float(os.getenv('RSI_OB',   '75'))
-RSI_OS       = float(os.getenv('RSI_OS',   '25'))
+# ═══════════════════════════════════════════════════════
+# RISK MANAGEMENT
+# ═══════════════════════════════════════════════════════
+BASE_RISK_PERCENT   = 0.01
+KELLY_FRACTION      = 0.25
+MAX_RISK_PERCENT    = 0.03
+MIN_RISK_PERCENT    = 0.005
+MAX_DAILY_RISK      = 0.05
+MAX_WEEKLY_RISK     = 0.10
+DAILY_PROFIT_TARGET = 0.03
 
-# ── [14] Dynamic SL/TP ──
-ATR_REGIME_PERIOD = int(os.getenv('ATR_REGIME', '50'))
-SL_MIN_MULT       = float(os.getenv('SL_MIN',   '1.0'))
-SL_MAX_MULT       = float(os.getenv('SL_MAX',   '2.5'))
-TP_MIN_MULT       = float(os.getenv('TP_MIN',   '1.5'))
-TP_MAX_MULT       = float(os.getenv('TP_MAX',   '4.0'))
+SESSIONS = {
+    'ASIA':        {'start': 0,  'end': 7,  'risk_mult': 0.5, 'name': 'آسيا (هادئ)'},
+    'LONDON_OPEN': {'start': 7,  'end': 10, 'risk_mult': 1.2, 'name': 'فتح لندن'},
+    'LONDON_MID':  {'start': 10, 'end': 12, 'risk_mult': 1.0, 'name': 'منتصف لندن'},
+    'LONDON_NY':   {'start': 12, 'end': 16, 'risk_mult': 1.5, 'name': 'تداخل لندن-نيويورك ⭐'},
+    'NY_PM':       {'start': 16, 'end': 20, 'risk_mult': 0.7, 'name': 'بعد الظهر الأمريكي'},
+    'QUIET':       {'start': 20, 'end': 24, 'risk_mult': 0.3, 'name': 'هادئ'},
+}
 
-# ── [15] Market Structure ──
-STRUCTURE_LOOKBACK = int(os.getenv('STRUCT_LOOKBACK', '30'))
+VOLATILITY_THRESHOLDS   = {'EXTREME': 2.0, 'HIGH': 1.5, 'LOW': 0.6}
+MAX_TRADE_DURATION_BARS = 24
+TRAILING_START_R        = 2.5
+TRAILING_ATR_MULT       = 1.0
 
-# ── Filters ──
-MAX_SPREAD_ATR_RATIO = float(os.getenv('MAX_SPREAD_ATR', '0.30'))
+STAGE1_TP_R, STAGE1_PCT = 1.5, 0.50
+STAGE2_TP_R, STAGE2_PCT = 2.5, 0.30
+FINAL_TP_R,  FINAL_PCT  = 3.5, 0.50
 
-# ── Break-even ──
-BE_TRIGGER_R = float(os.getenv('BE_TRIGGER', '1.0'))
+PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
 
-# ── Trailing ──
-TRAIL_MODE      = os.getenv('TRAIL_MODE',       'STRUCTURE')
-TRAIL_TRIGGER_R = float(os.getenv('TRAIL_TRIGGER', '1.5'))
-TRAIL_ATR_MULT  = float(os.getenv('TRAIL_ATR',     '2.0'))
-SWING_LOOKBACK  = int(os.getenv('SWING_LOOKBACK',  '5'))
+RISK_PERCENT         = float(os.getenv('RISK_PERCENT', '0.01'))
+MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '6'))
+MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS', '3'))
+ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
-# ── Risk ──
-RISK_PERCENT         = float(os.getenv('RISK_PERCENT',    '0.01'))
-MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES',   '3'))
-MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS',   '5'))
-ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE','1000'))
-
-# ── [11][16] Session Risk ──
-SESSION_RISK_MULTIPLIER   = float(os.getenv('SESSION_RISK_MULT',   '1.2'))
-RISK_MULT_MAX_CONSEC_LOSS = int(os.getenv('RISK_MULT_CONSEC_OFF',  '2'))
-
-# ── [9] News ──
-HIGH_IMPACT_NEWS = [(8,30),(12,30),(14,0),(15,30)]
-NEWS_BUFFER_MIN  = int(os.getenv('NEWS_BUFFER_MIN', '15'))
-
-# ══════════════════════════════════════════════════════
-# ★ [17] EQUITY PROTECTION
-# ══════════════════════════════════════════════════════
-DAILY_LOSS_LIMIT   = float(os.getenv('DAILY_LOSS_LIMIT',  '0.03'))  # 3% يومي
-WEEKLY_LOSS_LIMIT  = float(os.getenv('WEEKLY_LOSS_LIMIT', '0.06'))  # 6% أسبوعي
-DAILY_PROFIT_LOCK  = float(os.getenv('DAILY_PROFIT_LOCK', '0.05'))  # 5% قفل الأرباح اليومية
-
-# ══════════════════════════════════════════════════════
-# ★ [18] SMART RISK BY PERFORMANCE
-# ══════════════════════════════════════════════════════
-# نافذة التقييم: آخر N صفقة
-PERF_WINDOW       = int(os.getenv('PERF_WINDOW',      '10'))
-# إذا WR > هذا → نرفع المخاطرة
-PERF_BOOST_WR     = float(os.getenv('PERF_BOOST_WR',  '0.60'))   # 60%
-PERF_BOOST_MULT   = float(os.getenv('PERF_BOOST_MULT','1.25'))   # +25% risk
-# إذا WR < هذا → نخفض المخاطرة
-PERF_CUT_WR       = float(os.getenv('PERF_CUT_WR',   '0.40'))    # 40%
-PERF_CUT_MULT     = float(os.getenv('PERF_CUT_MULT',  '0.75'))   # -25% risk
-
-# ══════════════════════════════════════════════════════
-# ★ [19] PARTIAL TAKE PROFIT
-# ══════════════════════════════════════════════════════
-PTP_ENABLED    = os.getenv('PTP_ENABLED', 'true').lower() == 'true'
-PTP_TP1_R      = float(os.getenv('PTP_TP1_R',    '1.0'))   # أغلق جزء عند 1R
-PTP_TP1_PCT    = float(os.getenv('PTP_TP1_PCT',  '0.50'))  # 50% من الحجم
-PTP_TRAIL_REST = os.getenv('PTP_TRAIL_REST', 'true').lower() == 'true'  # تتبع الباقي
-
-# ── Files ──
-_BASE_DIR  = os.getenv('DATA_DIR', '/tmp')
-DB_FILE    = os.path.join(_BASE_DIR, 'tl_breaks_bot.db')
+_BASE_DIR  = os.getenv('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
+DB_FILE    = os.path.join(_BASE_DIR, 'multi_bot.db')
 TRADES_CSV = os.path.join(_BASE_DIR, 'trades_log.csv')
 
-db_lock         = Lock()
-session_headers = {}
-_meta_cache: dict = {}
-
-# حالة Partial TP في الذاكرة {deal_id: bool}
-_ptp_done: dict = {}
+db_lock, session_headers, _meta_cache = Lock(), {}, {}
+_candle_cache = {}
 
 CSV_HEADERS = [
-    'date','time_utc','pair','direction',
-    'entry','sl','tp1','tp',
-    'exit_price','atr','size','sl_dist',
-    'pnl_usd','pnl_r','result',
-    'bars_held','spread','tf',
-    'rsi','structure','atr_regime',
-    'risk_mult','note',
+    'date', 'time_utc', 'pair', 'direction', 'entry', 'sl', 'tp', 'exit_price',
+    'atr', 'size', 'sl_dist', 'pnl_usd', 'pnl_r', 'result', 'bars_held', 'spread', 'tf',
+    'stage1_done', 'stage2_done', 'stage3_done', 'final_locked_r', 'exit_type',
+    'session_used', 'risk_percent', 'indicator', 'notes'
 ]
 
 
 # ═══════════════════════════════════════════════════════
-# UTILS
+# DATABASE
 # ═══════════════════════════════════════════════════════
+
+def _migrate_database(conn):
+    try:
+        cols = conn.execute("PRAGMA table_info(trades)").fetchall()
+        col_names = {c[1] for c in cols}
+        new_cols = {
+            'pnl_r': 'REAL DEFAULT 0',
+            'pnl_usd': 'REAL DEFAULT 0',
+            'exit_price': 'REAL',
+            'bars_held': 'INTEGER DEFAULT 0',
+            'risk_percent': 'REAL DEFAULT 0'
+        }
+        for col, col_type in new_cols.items():
+            if col not in col_names:
+                conn.execute(f'ALTER TABLE trades ADD COLUMN {col} {col_type}')
+                log(f'  ✅ DB: added {col}')
+    except Exception as ex:
+        log(f'  ⚠️ DB: {ex}')
+
+def db_init():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY,
+            key TEXT UNIQUE,
+            pair TEXT,
+            direction TEXT,
+            timestamp TEXT,
+            entry REAL,
+            sl REAL,
+            tp REAL,
+            atr REAL,
+            size REAL,
+            spread REAL DEFAULT 0,
+            status TEXT DEFAULT 'PENDING',
+            stage1_done INTEGER DEFAULT 0,
+            stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0,
+            final_locked_r REAL DEFAULT 0,
+            exit_type TEXT,
+            session_used TEXT,
+            risk_percent REAL,
+            pnl_r REAL DEFAULT 0,
+            pnl_usd REAL DEFAULT 0,
+            exit_price REAL,
+            bars_held INTEGER DEFAULT 0
+        )''')
+        _migrate_database(conn)
+        conn.execute('''CREATE TABLE IF NOT EXISTS open_positions (
+            deal_id TEXT PRIMARY KEY,
+            pair TEXT,
+            direction TEXT,
+            entry REAL,
+            sl REAL,
+            tp REAL,
+            atr REAL,
+            size REAL,
+            db_key TEXT,
+            opened_at TEXT,
+            stage1_done INTEGER DEFAULT 0,
+            stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0,
+            final_locked_r REAL DEFAULT 0,
+            bars_held INTEGER DEFAULT 0
+        )''')
+        conn.commit()
+
+def db_save(key, pair, direction, entry, sl, tp, atr, size, spread, risk_pct, session):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            try:
+                conn.execute(
+                    'INSERT INTO trades (key,pair,direction,timestamp,entry,sl,tp,atr,size,spread,risk_percent,session_used) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (key, pair, direction, utc_now(), entry, sl, tp, atr, size, spread, risk_pct, session)
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                pass
+
+def db_update(key, status, exit_type=None):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            if exit_type:
+                conn.execute('UPDATE trades SET status=?, exit_type=? WHERE key=?', (status, exit_type, key))
+            else:
+                conn.execute('UPDATE trades SET status=? WHERE key=?', (status, key))
+            conn.commit()
+
+def db_is_dup(key):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            return conn.execute('SELECT id FROM trades WHERE key=?', (key,)).fetchone() is not None
+
+def db_get_recent_trades(pair=None, limit=20):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            query = "SELECT pair, direction, status, pnl_r, timestamp FROM trades WHERE status IN ('WIN','LOSS')"
+            params = []
+            if pair:
+                query += " AND pair=?"
+                params.append(pair)
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            return conn.execute(query, params).fetchall()
+
+def _update_trade_pnl(db_key, pnl_r, pnl_usd, exit_price, bars_held):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            try:
+                conn.execute(
+                    'UPDATE trades SET pnl_r=?, pnl_usd=?, exit_price=?, bars_held=? WHERE key=?',
+                    (pnl_r, pnl_usd, exit_price, bars_held, db_key)
+                )
+                conn.commit()
+            except Exception as ex:
+                log(f'  ⚠️ PnL update: {ex}')
+
+def op_save(deal_id, pair, direction, entry, sl, tp, atr, size, db_key):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            try:
+                conn.execute(
+                    'INSERT OR IGNORE INTO open_positions (deal_id,pair,direction,entry,sl,tp,atr,size,db_key,opened_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                    (deal_id, pair, direction, entry, sl, tp, atr, size, db_key, utc_now())
+                )
+                conn.commit()
+            except Exception as ex:
+                log(f'op_save: {ex}')
+
+def op_get_all():
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute('SELECT * FROM open_positions').fetchall()]
+
+def op_update(deal_id, **kwargs):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            cols = {c[1] for c in conn.execute("PRAGMA table_info(open_positions)").fetchall()}
+            for col, val in kwargs.items():
+                if col in cols:
+                    conn.execute(f'UPDATE open_positions SET {col}=? WHERE deal_id=?', (val, deal_id))
+            conn.commit()
+
+def op_delete(deal_id):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute('DELETE FROM open_positions WHERE deal_id=?', (deal_id,))
+            conn.commit()
+
+
+# ═══════════════════════════════════════════════════════
+# RISK MANAGEMENT
+# ═══════════════════════════════════════════════════════
+
+def calculate_pnl_since(since_dt):
+    with db_lock:
+        with sqlite3.connect(DB_FILE) as conn:
+            rows = conn.execute(
+                "SELECT pnl_r, sl, size FROM trades WHERE timestamp >= ? AND status IN ('WIN','LOSS')",
+                (since_dt.strftime('%Y-%m-%d %H:%M UTC'),)
+            ).fetchall()
+            total_pnl = 0.0
+            for pnl_r, sl, size in rows:
+                if pnl_r and sl:
+                    total_pnl += pnl_r * abs(sl) * size * 100
+            return total_pnl
+
+def check_drawdown_limits():
+    now     = datetime.now(timezone.utc)
+    balance = get_current_balance()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_pnl   = calculate_pnl_since(day_start)
+    if day_pnl <= -balance * MAX_DAILY_RISK:
+        return False, f'🛑 DAILY LIMIT: {day_pnl/balance:.1%}', 0.0
+    if day_pnl >= balance * DAILY_PROFIT_TARGET:
+        return False, f'🔒 DAILY TARGET: +{day_pnl/balance:.1%}', 0.0
+    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0)
+    week_pnl   = calculate_pnl_since(week_start)
+    if week_pnl <= -balance * MAX_WEEKLY_RISK:
+        return False, f'🛑 WEEKLY LIMIT: {week_pnl/balance:.1%}', 0.0
+    return True, 'OK', day_pnl
+
+def get_pair_stats(pair, lookback=20):
+    trades = db_get_recent_trades(pair, lookback)
+    if len(trades) < 5:
+        return None
+    wins   = [t for t in trades if t[2] == 'WIN']
+    losses = [t for t in trades if t[2] == 'LOSS']
+    win_rate   = len(wins) / len(trades)
+    avg_win_r  = np.mean([t[3] for t in wins])        if wins   else 0
+    avg_loss_r = abs(np.mean([t[3] for t in losses])) if losses else 1
+    if avg_loss_r == 0: avg_loss_r = 1
+    kelly = (win_rate * (avg_win_r/avg_loss_r) - (1 - win_rate)) / (avg_win_r/avg_loss_r) if avg_win_r > 0 else 0
+    kelly = max(0, min(kelly, 0.10))
+    consecutive_wins = consecutive_losses = 0
+    cur_type = None
+    cur_consec = 0
+    for t in sorted(trades, key=lambda x: x[4]):
+        if t[2] == 'WIN':
+            if cur_type == 'WIN': cur_consec += 1
+            else: cur_consec = 1; cur_type = 'WIN'
+            consecutive_wins = max(consecutive_wins, cur_consec)
+        else:
+            if cur_type == 'LOSS': cur_consec += 1
+            else: cur_consec = 1; cur_type = 'LOSS'
+            consecutive_losses = max(consecutive_losses, cur_consec)
+    return {'total': len(trades), 'win_rate': win_rate, 'kelly': kelly, 'consecutive_losses': consecutive_losses}
+
+def calculate_dynamic_risk(pair, base_risk=BASE_RISK_PERCENT):
+    stats = get_pair_stats(pair)
+    if not stats:
+        return base_risk, 'default'
+    risk = base_risk
+    if stats['consecutive_losses'] >= 3:   risk *= 0.4
+    elif stats['consecutive_losses'] == 2: risk *= 0.6
+    return max(MIN_RISK_PERCENT, min(risk, MAX_RISK_PERCENT)), 'dynamic'
+
+
+# ═══════════════════════════════════════════════════════
+# SESSION & VOLATILITY
+# ═══════════════════════════════════════════════════════
+
+def get_session_info():
+    hour = datetime.now(timezone.utc).hour
+    for session_name, config in SESSIONS.items():
+        if config['start'] <= hour < config['end']:
+            return config['risk_mult'], config['name'], session_name
+    return 0.0, 'مغلقة', 'CLOSED'
+
+def check_volatility_regime(epic, tf=STRATEGY_TF):
+    df = fetch_candles(epic, tf, 100)
+    if df.empty or len(df) < 50:
+        return 'NORMAL', 1.0
+    atr_current = calc_atr_series(df.iloc[:-1],  ATR_PERIOD).iloc[-1]
+    atr_hist    = calc_atr_series(df.iloc[:-20], ATR_PERIOD).iloc[-20:].mean()
+    ratio = atr_current / atr_hist if atr_hist > 0 else 1
+    if   ratio > VOLATILITY_THRESHOLDS['EXTREME']: return 'EXTREME', 0.0
+    elif ratio > VOLATILITY_THRESHOLDS['HIGH']:    return 'HIGH',    0.7
+    elif ratio < VOLATILITY_THRESHOLDS['LOW']:     return 'LOW',     0.6
+    else:                                           return 'NORMAL',  1.0
+
+def should_trade():
+    allowed, reason, day_pnl = check_drawdown_limits()
+    if not allowed:
+        return False, reason, 0.0, None, 0.0
+    session_mult, session_name, session_code = get_session_info()
+    if session_mult == 0:
+        return False, f'⏸ Session: {session_name}', 0.0, None, 0.0
+    return True, 'OK', session_mult, session_name, day_pnl
+
+
+# ═══════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════
+
 def utc_now():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
 def log(msg):
     print(f'[{utc_now()}] {msg}', flush=True)
 
-
-# ═══════════════════════════════════════════════════════
-# [8] SESSION FILTER
-# ═══════════════════════════════════════════════════════
-def is_trading_session():
-    return 7 <= datetime.now(timezone.utc).hour < 16
-
-
-# ═══════════════════════════════════════════════════════
-# [9] NEWS FILTER
-# ═══════════════════════════════════════════════════════
-def is_news_time():
-    now = datetime.now(timezone.utc)
-    for h, m in HIGH_IMPACT_NEWS:
-        news_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        diff_min  = abs((now - news_time).total_seconds()) / 60
-        if diff_min <= NEWS_BUFFER_MIN:
-            log(f'  📰 خبر قوي ({h:02d}:{m:02d} UTC) — فرق {diff_min:.1f}m')
-            return True
-    return False
-
-
-# ═══════════════════════════════════════════════════════
-# DATABASE
-# ═══════════════════════════════════════════════════════
-def db_init():
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS trades (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            key       TEXT UNIQUE,
-            pair      TEXT,
-            direction TEXT,
-            timestamp TEXT,
-            entry     REAL, sl REAL, tp REAL,
-            atr       REAL, size REAL,
-            spread    REAL DEFAULT 0,
-            status    TEXT DEFAULT 'PENDING'
-        )''')
-        for col, defn in [('spread','REAL DEFAULT 0'),
-                          ('tp1','REAL DEFAULT 0'),
-                          ('risk_mult','REAL DEFAULT 1.0')]:
-            try:
-                conn.execute(f'ALTER TABLE trades ADD COLUMN {col} {defn}')
-            except Exception:
-                pass
-        conn.commit()
-
-def db_save(key, pair, direction, entry, sl, tp, atr, size,
-            spread=0.0, tp1=0.0, risk_mult=1.0):
-    with db_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            try:
-                conn.execute(
-                    'INSERT INTO trades'
-                    ' (key,pair,direction,timestamp,entry,sl,tp,atr,size,spread,tp1,risk_mult)'
-                    ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (key, pair, direction, utc_now(),
-                     entry, sl, tp, atr, size, spread, tp1, risk_mult)
-                )
-                conn.commit()
-            except sqlite3.IntegrityError:
-                pass
-
-def db_update(key, status):
-    with db_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute('UPDATE trades SET status=? WHERE key=?', (status, key))
-            conn.commit()
-
-def db_is_dup(key):
-    with db_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            return conn.execute(
-                'SELECT id FROM trades WHERE key=?', (key,)
-            ).fetchone() is not None
-
-def db_consec_losses(pair):
-    with db_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            rows = conn.execute(
-                "SELECT status FROM trades WHERE pair=? AND status IN ('WIN','LOSS')"
-                " ORDER BY id DESC LIMIT 8", (pair,)
-            ).fetchall()
-            count = 0
-            for r in rows:
-                if r[0] == 'LOSS': count += 1
-                else: break
-            return count
-
-def db_get_recent_results(n=10):
-    """آخر N صفقة مغلقة — لـ Smart Risk"""
-    with db_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            rows = conn.execute(
-                "SELECT status FROM trades WHERE status IN ('WIN','LOSS')"
-                " ORDER BY id DESC LIMIT ?", (n,)
-            ).fetchall()
-            return [r[0] for r in rows]
-
-def db_get_pnl_since(since_ts: str):
-    """
-    يجمع PnL التقريبي من خلال (entry-sl)*size للصفقات الخاسرة
-    وعكسه للرابحة — منذ تاريخ معين.
-    نستخدمه فقط لفلتر الـ Equity Protection.
-    """
-    with db_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            rows = conn.execute(
-                "SELECT status, atr, size FROM trades"
-                " WHERE timestamp >= ? AND status IN ('WIN','LOSS')",
-                (since_ts,)
-            ).fetchall()
-            total = 0.0
-            for status, atr, size in rows:
-                # تقدير: ربح/خسارة ≈ ±(ATR × SL_MULT × size)
-                val = float(atr or 0) * SL_ATR_MULT * float(size or 0)
-                total += val if status == 'WIN' else -val
-            return total
-
-
-# ═══════════════════════════════════════════════════════
-# ★ [17] EQUITY PROTECTION
-# ═══════════════════════════════════════════════════════
-def check_equity_protection():
-    """
-    يتحقق من حدود الخسارة اليومية والأسبوعية.
-    يُعيد (allowed: bool, reason: str)
-    """
-    now     = datetime.now(timezone.utc)
-    balance = ACCOUNT_BALANCE
-
-    # ── يومي ──
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_pnl   = db_get_pnl_since(day_start.strftime('%Y-%m-%d %H:%M UTC'))
-    day_loss_limit  = balance * DAILY_LOSS_LIMIT
-    day_profit_lock = balance * DAILY_PROFIT_LOCK
-
-    if day_pnl <= -day_loss_limit:
-        reason = (f'🛑 حد الخسارة اليومي: ${day_pnl:.2f} / -${day_loss_limit:.2f}')
-        return False, reason
-
-    if day_pnl >= day_profit_lock:
-        reason = (f'🔐 قفل الأرباح اليومي: +${day_pnl:.2f} ≥ +${day_profit_lock:.2f}')
-        return False, reason
-
-    # ── أسبوعي ──
-    week_start = (now - timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0)
-    week_pnl  = db_get_pnl_since(week_start.strftime('%Y-%m-%d %H:%M UTC'))
-    week_loss_limit = balance * WEEKLY_LOSS_LIMIT
-
-    if week_pnl <= -week_loss_limit:
-        reason = (f'🛑 حد الخسارة الأسبوعي: ${week_pnl:.2f} / -${week_loss_limit:.2f}')
-        return False, reason
-
-    return True, 'OK'
-
-
-# ═══════════════════════════════════════════════════════
-# ★ [18] SMART RISK BY PERFORMANCE
-# ═══════════════════════════════════════════════════════
-def get_performance_risk_mult(pair_name: str) -> float:
-    """
-    يحلل آخر PERF_WINDOW صفقة ويضبط المخاطرة:
-    WR > 60% → يرفع لـ 1.25x
-    WR < 40% → يخفض لـ 0.75x
-    بينهما   → 1.0x (طبيعي)
-    """
-    results = db_get_recent_results(PERF_WINDOW)
-    if len(results) < 3:
-        log(f'  {pair_name}: [PerfRisk] بيانات غير كافية → 1.0x')
-        return 1.0
-
-    wr = results.count('WIN') / len(results)
-
-    if wr >= PERF_BOOST_WR:
-        log(f'  {pair_name}: [PerfRisk] 🔥 WR={wr:.0%} → Boost {PERF_BOOST_MULT}x')
-        return PERF_BOOST_MULT
-    elif wr <= PERF_CUT_WR:
-        log(f'  {pair_name}: [PerfRisk] 🧊 WR={wr:.0%} → Cut {PERF_CUT_MULT}x')
-        return PERF_CUT_MULT
-
-    log(f'  {pair_name}: [PerfRisk] WR={wr:.0%} → Normal 1.0x')
-    return 1.0
-
-
-# ═══════════════════════════════════════════════════════
-# [16] SMART SESSION RISK MULTIPLIER
-# ═══════════════════════════════════════════════════════
-def get_smart_risk_multiplier(pair_name: str) -> float:
-    """يجمع Session Mult + Performance Mult"""
-    session_mult = SESSION_RISK_MULTIPLIER if is_trading_session() else 1.0
-    consec       = db_consec_losses(pair_name)
-    if consec >= RISK_MULT_MAX_CONSEC_LOSS:
-        log(f'  {pair_name}: ⚠️ Session Mult OFF — {consec} خسائر')
-        session_mult = 1.0
-
-    perf_mult = get_performance_risk_mult(pair_name)
-
-    # الناتج النهائي: لا يتجاوز 2.0x ولا يقل عن 0.5x
-    final = max(0.5, min(session_mult * perf_mult, 2.0))
-    log(f'  {pair_name}: [RiskMult] Session={session_mult}x × Perf={perf_mult}x = {final}x')
-    return final
-
-
-# ═══════════════════════════════════════════════════════
-# CSV LOGGER
-# ═══════════════════════════════════════════════════════
 def csv_init():
     if not Path(TRADES_CSV).exists():
         with open(TRADES_CSV, 'w', newline='', encoding='utf-8-sig') as f:
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writeheader()
-        log(f'📄 CSV جاهز: {TRADES_CSV}')
 
-def csv_log_trade(pair, direction, entry, sl, tp, exit_price,
-                  atr, size, spread=0.0, bars_held=0,
-                  rsi=0.0, structure='', atr_regime='',
-                  risk_mult=1.0, tp1=0.0, note=''):
+def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0, exit_type=''):
     try:
+        entry, sl, size, dir_, pair = pos['entry'], pos['sl'], pos['size'], pos['direction'], pos['pair']
         sl_dist = abs(entry - sl)
-        pnl_pts = (exit_price - entry) if direction == 'BUY' else (entry - exit_price)
-        cached  = _meta_cache.get(pair)
-        cs_val  = cached['data'][3] if cached else 100.0
-        pnl_usd = round(pnl_pts * size * cs_val, 2)
-        pnl_r   = round(pnl_pts / sl_dist, 2) if sl_dist > 0 else 0.0
+        pnl_pts = (exit_price - entry) if dir_ == 'BUY' else (entry - exit_price)
+        pnl_r   = round(pnl_pts / sl_dist, 2) if sl_dist > 0 else 0
         result  = 'WIN' if pnl_pts > 0 else ('LOSS' if pnl_pts < 0 else 'BE')
-
+        meta    = _meta_cache.get(pair, {}).get('data')
+        pnl_usd = round(pnl_pts * size * (meta[3] if meta else 1), 2)
+        _update_trade_pnl(pos['db_key'], pnl_r, pnl_usd, exit_price, pos.get('bars_held', 0))
         now = datetime.now(timezone.utc)
         row = {
-            'date':       now.strftime('%Y-%m-%d'),
-            'time_utc':   now.strftime('%H:%M'),
-            'pair':       pair, 'direction': direction,
-            'entry':      entry, 'sl': sl,
-            'tp1':        round(tp1, 5), 'tp': tp,
-            'exit_price': exit_price, 'atr': atr, 'size': size,
-            'sl_dist':    round(sl_dist, 5),
-            'pnl_usd':    pnl_usd, 'pnl_r': pnl_r, 'result': result,
-            'bars_held':  bars_held, 'spread': spread, 'tf': STRATEGY_TF,
-            'rsi':        round(rsi, 1), 'structure': structure,
-            'atr_regime': atr_regime, 'risk_mult': risk_mult, 'note': note,
+            'date': now.strftime('%Y-%m-%d'), 'time_utc': now.strftime('%H:%M'),
+            'pair': pair, 'direction': dir_, 'entry': entry, 'sl': sl, 'tp': pos['tp'],
+            'exit_price': exit_price, 'atr': pos['atr'], 'size': size,
+            'sl_dist': round(sl_dist, 5), 'pnl_usd': pnl_usd, 'pnl_r': pnl_r,
+            'result': result, 'bars_held': pos.get('bars_held', 0),
+            'spread': pos.get('spread', 0), 'tf': STRATEGY_TF,
+            'stage1_done': stage1, 'stage2_done': stage2, 'stage3_done': stage3,
+            'final_locked_r': final_r, 'exit_type': exit_type,
+            'session_used': pos.get('session_used', ''),
+            'risk_percent': pos.get('risk_percent', 0),
+            'indicator': f'ST({SUPERTREND_PERIOD},{SUPERTREND_MULT})+EMA{EMA_PERIOD}', 'notes': ''
         }
-
         with open(TRADES_CSV, 'a', newline='', encoding='utf-8-sig') as f:
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writerow(row)
-
         icon = '✅' if result == 'WIN' else ('❌' if result == 'LOSS' else '🔵')
-        log(f'  {icon} CLOSED: {pair} {direction} | '
-            f'PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R) | {result}')
-
+        log(f'  {icon} {pair} {dir_} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R)')
         nl = '\n'
-        tg(
-            f'{icon} *{pair} {direction} — {result}*{nl}'
-            f'Entry:`{entry}` → Exit:`{exit_price}`{nl}'
-            f'PnL:`${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}'
-            f'RSI:`{round(rsi,1)}` | Struct:`{structure}` | Regime:`{atr_regime}`{nl}'
-            f'RiskMult:`{risk_mult}x` | Note:_{note}_{nl}'
-            f'_{now.strftime("%Y-%m-%d %H:%M UTC")}_'
-        )
-        return result
+        tg(f'{icon} *{pair} {dir_}*{nl}PnL: `${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}_{utc_now()}_')
+        return result, pnl_usd
     except Exception as ex:
-        log(f'  csv_log_trade ERROR: {ex}')
-        return 'ERROR'
-
-def csv_summary(period='daily'):
-    if not Path(TRADES_CSV).exists():
-        return
-    try:
-        df = pd.read_csv(TRADES_CSV, encoding='utf-8-sig')
-        if df.empty: return
-        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        if period == 'daily':
-            df = df[df['date'] == today]; label = f'Daily — {today}'
-        elif period == 'weekly':
-            df['date'] = pd.to_datetime(df['date'])
-            df = df[df['date'] >= pd.Timestamp.now(tz='UTC').floor('D') - pd.Timedelta(days=7)]
-            label = 'Last 7 Days'
-        else:
-            label = 'All Time'
-        if df.empty: return
-
-        total = len(df)
-        wins  = (df['result'] == 'WIN').sum()
-        losses= (df['result'] == 'LOSS').sum()
-        wr    = round(wins / total * 100, 1)
-        tp_   = round(df['pnl_usd'].sum(), 2)
-        tr    = round(df['pnl_r'].sum(),   2)
-        ar    = round(df['pnl_r'].mean(),  2)
-        best  = df.loc[df['pnl_usd'].idxmax()]
-        worst = df.loc[df['pnl_usd'].idxmin()]
-        gw    = df[df['pnl_usd'] > 0]['pnl_usd'].sum()
-        gl    = abs(df[df['pnl_usd'] < 0]['pnl_usd'].sum())
-        pf    = round(gw / gl, 2) if gl > 0 else 0.0
-        mc = cur = 0
-        for r in df['result']:
-            if r == 'LOSS': cur += 1; mc = max(mc, cur)
-            else: cur = 0
-
-        nl = '\n'
-        tg(
-            f'📊 *Summary — {label}*{nl}'
-            f'Trades:`{total}` | WR:`{wr}%` | PF:`{pf}`{nl}'
-            f'PnL:`${tp_:+.2f}` | R:`{tr:+.2f}` | Avg:`{ar:+.2f}R`{nl}'
-            f'MaxL:`{mc}` | Best:`${best["pnl_usd"]:+.2f}` | Worst:`${worst["pnl_usd"]:+.2f}`'
-        )
-        log(f'  📊 Summary {label}: WR={wr}% PnL=${tp_:+.2f} R={tr:+.2f}')
-    except Exception as ex:
-        log(f'  csv_summary ERROR: {ex}')
+        log(f'  csv_log ERROR: {ex}')
+        return 'ERROR', 0
 
 
 # ═══════════════════════════════════════════════════════
 # API HELPERS
 # ═══════════════════════════════════════════════════════
+
 def _get(path, params=None, retries=3):
     for attempt in range(retries):
         try:
-            r = requests.get(BASE_URL + path, headers=session_headers,
-                             params=params, timeout=15)
+            r = requests.get(BASE_URL + path, headers=session_headers, params=params, timeout=15)
             if r.status_code == 429:
-                time.sleep(5 * (attempt + 1)); continue
+                time.sleep(5 * (attempt + 1))
+                continue
             return r
         except requests.exceptions.RequestException as ex:
-            log(f'  GET {path} [{attempt+1}/{retries}]: {ex}')
+            log(f'  GET {path}: {ex}')
             time.sleep(3 * (attempt + 1))
     return None
 
 def _post(path, body, retries=2):
     for attempt in range(retries):
         try:
-            return requests.post(BASE_URL + path, headers=session_headers,
-                                 json=body, timeout=15)
+            return requests.post(BASE_URL + path, headers=session_headers, json=body, timeout=15)
         except requests.exceptions.RequestException as ex:
-            log(f'  POST {path} [{attempt+1}/{retries}]: {ex}')
+            log(f'  POST {path}: {ex}')
             time.sleep(3 * (attempt + 1))
     return None
 
 def _put(path, body):
     try:
-        return requests.put(BASE_URL + path, headers=session_headers,
-                            json=body, timeout=10)
+        return requests.put(BASE_URL + path, headers=session_headers, json=body, timeout=10)
     except Exception as ex:
-        log(f'  PUT {path}: {ex}')
-    return None
+        log(f'  PUT: {ex}')
 
 def _delete(path):
     try:
-        return requests.delete(BASE_URL + path, headers=session_headers,
-                               timeout=10)
+        return requests.delete(BASE_URL + path, headers=session_headers, timeout=10)
     except Exception as ex:
-        log(f'  DELETE {path}: {ex}')
-    return None
+        log(f'  DELETE: {ex}')
 
-
-# ═══════════════════════════════════════════════════════
-# SESSION
-# ═══════════════════════════════════════════════════════
 def create_session():
     url  = BASE_URL + '/api/v1/session'
     hdrs = {'X-CAP-API-KEY': API_KEY, 'Content-Type': 'application/json'}
-    body = {'identifier': EMAIL, 'password': PASSWORD, 'encryptedPassword': False}
     try:
-        r = requests.post(url, headers=hdrs, json=body, timeout=15)
+        r = requests.post(url, headers=hdrs,
+                          json={'identifier': EMAIL, 'password': PASSWORD, 'encryptedPassword': False},
+                          timeout=15)
         if r.status_code == 200:
             session_headers.update({
                 'X-SECURITY-TOKEN': r.headers.get('X-SECURITY-TOKEN'),
                 'CST':              r.headers.get('CST'),
-                'Content-Type':     'application/json',
+                'Content-Type':     'application/json'
             })
-            log('✅ Session OK'); return True
-        log(f'❌ Session FAILED [{r.status_code}]: {r.text[:100]}')
+            log('✅ Session OK')
+            return True
+        log(f'❌ Session FAILED: {r.status_code}')
     except Exception as ex:
-        log(f'❌ Session ERROR: {ex}')
+        log(f'❌ Session: {ex}')
     return False
 
-def ping_session(): _get('/api/v1/ping')
+def ping_session():
+    _get('/api/v1/ping')
 
-def get_balance():
+def get_current_balance():
     global ACCOUNT_BALANCE
     r = _get('/api/v1/accounts')
     if r and r.status_code == 200:
         accs = r.json().get('accounts', [])
         if accs:
-            ACCOUNT_BALANCE = float(
-                accs[0].get('balance', {}).get('available', ACCOUNT_BALANCE))
-            log(f'💰 Balance: ${round(ACCOUNT_BALANCE, 2)}')
+            ACCOUNT_BALANCE = float(accs[0].get('balance', {}).get('available', ACCOUNT_BALANCE))
+    return ACCOUNT_BALANCE
 
 def get_open_positions():
     r = _get('/api/v1/positions')
     return r.json().get('positions', []) if r and r.status_code == 200 else []
 
 def get_instrument_meta(epic):
-    now = time.time()
+    now    = time.time()
     cached = _meta_cache.get(epic)
     if cached and (now - cached['ts']) < 300:
         return cached['data']
     r = _get(f'/api/v1/markets/{epic}')
     if not r or r.status_code != 200:
         return 0.0, 0.0, 0.0, 100.0, 0.1, 1000.0
-    data  = r.json()
-    snap  = data.get('snapshot',     {})
-    inst  = data.get('instrument',   {})
-    deal  = data.get('dealingRules', {})
-    bid   = float(snap.get('bid',   0) or 0)
-    ask   = float(snap.get('offer', 0) or 0)
-    cs    = float(inst.get('contractSize', 100) or 100)
-    min_s = float((deal.get('minDealSize') or {}).get('value', 0.1)  or 0.1)
-    max_s = float((deal.get('maxDealSize') or {}).get('value', 1000) or 1000)
-    res   = (bid, ask, round(ask - bid, 5), cs, min_s, max_s)
-    _meta_cache[epic] = {'ts': now, 'data': res}
-    return res
+    data = r.json()
+    snap = data.get('snapshot', {})
+    inst = data.get('instrument', {})
+    deal = data.get('dealingRules', {})
+    bid  = float(snap.get('bid', 0) or 0)
+    ask  = float(snap.get('offer', 0) or 0)
+    result = (
+        bid, ask, round(ask - bid, 5),
+        float(inst.get('contractSize', 100) or 100),
+        float((deal.get('minDealSize') or {}).get('value', 0.1) or 0.1),
+        float((deal.get('maxDealSize') or {}).get('value', 1000) or 1000)
+    )
+    _meta_cache[epic] = {'ts': now, 'data': result}
+    return result
+
+def get_current_price(epic):
+    meta = get_instrument_meta(epic)
+    return (meta[0] + meta[1]) / 2 if meta[0] > 0 else 0
+
+def get_closed_deal_price(deal_id, fallback):
+    try:
+        r = _get('/api/v1/history/activity', params={'dealId': deal_id, 'pageSize': 10})
+        if r and r.status_code == 200:
+            for act in r.json().get('activities', []):
+                for action in act.get('details', {}).get('actions', []):
+                    if action.get('actionType') in ('POSITION_CLOSED',):
+                        lvl = action.get('level') or action.get('stopLevel') or action.get('dealPrice')
+                        if lvl:
+                            return float(lvl)
+    except Exception:
+        pass
+    return fallback
+
+def update_sl_api(deal_id, new_sl, tp):
+    r = _put(f'/api/v1/positions/{deal_id}', {'stopLevel': new_sl, 'profitLevel': tp})
+    if r and r.status_code == 200:
+        log(f'  ✅ SL → {new_sl}')
+        return True
+    return False
+
+def close_partial_api(deal_id, size):
+    r = _post(f'/api/v1/positions/{deal_id}', {'size': size})
+    if r and r.status_code == 200:
+        log(f'  💰 TP: {size}')
+        return True
+    return False
+
+def close_full_api(deal_id):
+    r = _delete(f'/api/v1/positions/{deal_id}')
+    return r and r.status_code == 200
 
 
 # ═══════════════════════════════════════════════════════
 # TELEGRAM
 # ═══════════════════════════════════════════════════════
+
 def tg(text):
-    if not TG_TOKEN: return
+    if not TG_TOKEN:
+        return
     try:
-        requests.post(
-            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            data={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': 'Markdown'},
-            timeout=10)
-    except Exception: pass
+        requests.post(f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
+                      data={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
+    except:
+        pass
 
-def tg_signal(sig):
+def tg_signal(sig, session_info):
     icon = '🟢' if sig['direction'] == 'BUY' else '🔴'
-    rr   = round(sig['tp_mult'] / sig['sl_mult'], 1)
+    mode = 'DEMO' if DEMO_MODE else 'LIVE'
     nl   = '\n'
-    ptp  = f'TP1:`{sig["tp1"]}` ({int(PTP_TP1_PCT*100)}%) → TP:`{sig["tp"]}`' \
-           if PTP_ENABLED else f'TP:`{sig["tp"]}`'
-    tg(
-        f'{icon} *{sig["pair"]} {sig["direction"]}* '
-        f'[{"DEMO" if DEMO_MODE else "LIVE"}]{nl}'
-        f'Entry:`{sig["entry"]}` | SL:`{sig["sl"]}`{nl}'
-        f'{ptp}{nl}'
-        f'R:R:`1:{rr}` | Size:`{sig["size"]}`{nl}'
-        f'ATR:`{sig["atr"]}` | Regime:`{sig["atr_regime"]}`{nl}'
-        f'RSI:`{sig["rsi"]:.1f}` | Struct:`{sig["structure"]}`{nl}'
-        f'RiskMult:`{sig["risk_mult"]}x` | TF:`{STRATEGY_TF}`{nl}'
-        f'_{utc_now()}_'
-    )
-
-def tg_result(pair, direction, status, ref, error=''):
-    icon = '✅' if status in ('ACCEPTED','SUCCESS') else '❌'
-    nl   = '\n'
-    msg  = f'{icon} *{pair} {direction} {status}*{nl}Ref:`{ref}`'
-    if error: msg += f'{nl}Err:`{error[:80]}`'
-    tg(msg)
-
-def tg_mgmt(pair, action, old_sl, new_sl):
-    icons = {'BE':'🔒','TRAIL':'📈','PTP':'💰','EQUITY':'🛑'}
-    tg(f'{icons.get(action,"⚙️")} *{action}* {pair}\nSL:`{old_sl}` → `{new_sl}`')
+    tg(f'{icon} *{sig["pair"]} {sig["direction"]}* [{mode}]{nl}'
+       f'Entry: `{sig["entry"]}` | SL: `{sig["sl"]}` | TP: `{sig["tp"]}`{nl}'
+       f'Risk: `{sig["risk_percent"]:.2%}`{nl}'
+       f'Session: `{session_info}`{nl}'
+       f'Indicator: Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD}{nl}'
+       f'_{utc_now()}_')
 
 
 # ═══════════════════════════════════════════════════════
-# CANDLES
+# ✅ INDICATORS
 # ═══════════════════════════════════════════════════════
-def fetch_candles(epic, resolution, count=300):
-    r = _get(f'/api/v1/prices/{epic}',
-             params={'resolution': resolution, 'max': count})
+
+def fetch_candles(epic, resolution, count=500):
+    cache_key = f'{epic}_{resolution}'
+    now = time.time()
+    if cache_key in _candle_cache:
+        cached = _candle_cache[cache_key]
+        if now - cached['ts'] < 60:
+            return cached['df']
+    r = _get(f'/api/v1/prices/{epic}', params={'resolution': resolution, 'max': count})
     if not r or r.status_code != 200:
+        _candle_cache.pop(cache_key, None)
         return pd.DataFrame()
     prices = r.json().get('prices', [])
-    if len(prices) < LENGTH * 3 + ATR_PERIOD:
+    if len(prices) < SUPERTREND_PERIOD * 3 + ATR_PERIOD:
         return pd.DataFrame()
     try:
         rows = [{
@@ -652,593 +594,419 @@ def fetch_candles(epic, resolution, count=300):
             'open':  (p['openPrice']['bid']  + p['openPrice']['ask'])  / 2,
             'high':  (p['highPrice']['bid']  + p['highPrice']['ask'])  / 2,
             'low':   (p['lowPrice']['bid']   + p['lowPrice']['ask'])   / 2,
-            'close': (p['closePrice']['bid'] + p['closePrice']['ask']) / 2,
+            'close': (p['closePrice']['bid'] + p['closePrice']['ask']) / 2
         } for p in prices]
-    except (KeyError, TypeError) as ex:
-        log(f'  candle parse ERROR: {ex}'); return pd.DataFrame()
+    except (KeyError, TypeError):
+        _candle_cache.pop(cache_key, None)
+        return pd.DataFrame()
     df = pd.DataFrame(rows)
     df['time'] = pd.to_datetime(df['time'], utc=True)
-    return df.sort_values('time').reset_index(drop=True)
+    df = df.sort_values('time').reset_index(drop=True)
+    _candle_cache[cache_key] = {'ts': now, 'df': df}
+    return df
 
 
-# ═══════════════════════════════════════════════════════
-# INDICATORS
-# ═══════════════════════════════════════════════════════
-def calc_atr_series(df, period=14):
+def calc_atr_series(df, period=14, method=None):
+    """
+    ATR بطريقتين:
+    RMA (default) = EWM  — مطابق لـ TradingView
+    SMA           = Rolling Mean
+    """
+    if method is None:
+        method = ATR_METHOD
     tr = pd.concat([
         df['high'] - df['low'],
         (df['high'] - df['close'].shift()).abs(),
         (df['low']  - df['close'].shift()).abs()
     ], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
-
-def calc_ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-def calc_rsi(series, period=14):
-    delta    = series.diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.ewm(span=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    return 100 - (100 / (1 + rs))
-
-def find_pivot_high(high_series, length):
-    n, pivots = len(high_series), [np.nan] * len(high_series)
-    for i in range(length, n - length):
-        if high_series.iloc[i] == high_series.iloc[i-length:i+length+1].max():
-            pivots[i] = high_series.iloc[i]
-    return pivots
-
-def find_pivot_low(low_series, length):
-    n, pivots = len(low_series), [np.nan] * len(low_series)
-    for i in range(length, n - length):
-        if low_series.iloc[i] == low_series.iloc[i-length:i+length+1].min():
-            pivots[i] = low_series.iloc[i]
-    return pivots
-
-def get_slope_val(method, df, idx, length, mult, atr_series):
-    atr_val = float(atr_series.iloc[idx]) if not np.isnan(atr_series.iloc[idx]) else 1e-6
-    if method == 'Stdev':
-        start = max(0, idx - length + 1)
-        stdev = df['close'].iloc[start:idx+1].std()
-        return (stdev * mult / length) if (not np.isnan(stdev) and stdev > 0) \
-               else (atr_val * mult / length)
-    elif method == 'Linreg':
-        start = max(0, idx - length + 1)
-        y = df['close'].iloc[start:idx+1].values
-        if len(y) >= 2:
-            return abs(np.polyfit(np.arange(len(y)), y, 1)[0]) * mult
-    return atr_val * mult / length
-
-def tl_value(anchor_idx, anchor_val, slope, goes_up, cur_idx):
-    bars = cur_idx - anchor_idx
-    return anchor_val + slope * bars if goes_up else anchor_val - slope * bars
-
-def get_atr_regime(atr_s, last_idx, period=50):
-    start   = max(0, last_idx - period)
-    atr_avg = float(atr_s.iloc[start:last_idx].mean())
-    atr_cur = float(atr_s.iloc[last_idx])
-    if atr_avg <= 0: return 'NORMAL', 1.0
-    ratio = atr_cur / atr_avg
-    if ratio >= 1.4: return 'HIGH',   ratio
-    if ratio <= 0.7: return 'LOW',    ratio
-    return 'NORMAL', ratio
-
-def calc_dynamic_sl_tp(direction, entry, last_atr, regime_label, regime_ratio):
-    if regime_label == 'HIGH':
-        sl_m = min(SL_ATR_MULT * 1.3, SL_MAX_MULT)
-        tp_m = min(TP_ATR_MULT * 1.3, TP_MAX_MULT)
-    elif regime_label == 'LOW':
-        sl_m = max(SL_ATR_MULT * 0.8, SL_MIN_MULT)
-        tp_m = max(TP_ATR_MULT * 0.8, TP_MIN_MULT)
+    if method.upper() == 'SMA':
+        return tr.rolling(window=period, min_periods=1).mean()
     else:
-        sl_m, tp_m = SL_ATR_MULT, TP_ATR_MULT
+        return tr.ewm(span=period, adjust=False).mean()
 
+
+def calc_supertrend(df, period=10, mult=3.0):
+    """
+    Supertrend الأصلي:
+    Period=10, Mult=3.0, ATR=RMA
+    Buy  = direction  1 (ST تحت السعر)
+    Sell = direction -1 (ST فوق السعر)
+    """
+    atr   = calc_atr_series(df, period)
+    hl2   = (df['high'] + df['low']) / 2
+    upper = (hl2 + mult * atr).values
+    lower = (hl2 - mult * atr).values
+    close = df['close'].values
+    n     = len(df)
+    final_u   = upper.copy()
+    final_l   = lower.copy()
+    st        = np.zeros(n)
+    direction = np.ones(n, dtype=int)
+    for i in range(1, n):
+        final_u[i] = upper[i] if (upper[i] < final_u[i-1] or close[i-1] > final_u[i-1]) else final_u[i-1]
+        final_l[i] = lower[i] if (lower[i] > final_l[i-1] or close[i-1] < final_l[i-1]) else final_l[i-1]
+        if st[i-1] == final_u[i-1]:
+            direction[i] = 1  if close[i] <= final_u[i] else -1
+        else:
+            direction[i] = -1 if close[i] >= final_l[i] else  1
+        st[i] = final_l[i] if direction[i] == 1 else final_u[i]
+    return pd.Series(st, index=df.index), pd.Series(direction, index=df.index)
+
+
+def calc_ema(s, p):
+    return s.ewm(span=p, adjust=False).mean()
+
+
+def check_correlation_filter(new_pair, new_direction):
+    correlated_pairs = {
+        'EURUSD': ['GBPUSD'], 'GBPUSD': ['EURUSD'],
+        'GOLD':   ['EURUSD'], 'BTCUSD': [],
+        'US100':  ['US500'],  'US500':  ['US100'],
+    }
+    tracked    = op_get_all()
+    live_pairs = {p['pair']: p['direction'] for p in tracked}
+    if new_pair in correlated_pairs:
+        for corr_pair in correlated_pairs[new_pair]:
+            if corr_pair in live_pairs and live_pairs[corr_pair] == new_direction:
+                return False, f'{corr_pair} open'
+    return True, 'OK'
+
+
+# ═══════════════════════════════════════════════════════
+# SMART EXITS
+# ═══════════════════════════════════════════════════════
+
+def calculate_sl_at_r(pos, locked_r):
+    entry   = pos['entry']
+    dir_    = pos['direction']
+    sl_dist = abs(pos['entry'] - pos['sl'])
+    if dir_ == 'BUY':
+        return round(entry + (locked_r * sl_dist), 5)
+    else:
+        return round(entry - (locked_r * sl_dist), 5)
+
+def get_progressive_lock(profit_r):
+    for threshold, locked in sorted(PROGRESSIVE_LOCK.items(), reverse=True):
+        if profit_r >= threshold:
+            return locked
+    return 0
+
+def should_move_sl(current_sl, new_sl, direction):
     if direction == 'BUY':
-        sl = round(entry - sl_m * last_atr, 5)
-        tp = round(entry + tp_m * last_atr, 5)
+        return new_sl > current_sl + 0.00001
     else:
-        sl = round(entry + sl_m * last_atr, 5)
-        tp = round(entry - tp_m * last_atr, 5)
-    return sl, tp, sl_m, tp_m
+        return new_sl < current_sl - 0.00001
 
-def get_market_structure(df_c, lookback=30):
-    if len(df_c) < lookback: return 'NEUTRAL'
-    half  = lookback // 2
-    rec   = df_c.iloc[-half:]
-    prev  = df_c.iloc[-lookback:-half]
-    hh = rec['high'].max() > prev['high'].max()
-    hl = rec['low'].min()  > prev['low'].min()
-    lh = rec['high'].max() < prev['high'].max()
-    ll = rec['low'].min()  < prev['low'].min()
-    if hh and hl: return 'BULLISH'
-    if lh and ll: return 'BEARISH'
-    return 'NEUTRAL'
+def calculate_trailing_sl(pos, cur_price, atr):
+    dir_       = pos['direction']
+    trail_dist = atr * TRAILING_ATR_MULT
+    if dir_ == 'BUY':
+        return round(cur_price - trail_dist, 5)
+    else:
+        return round(cur_price + trail_dist, 5)
+
+def manage_smart_exits():
+    tracked = op_get_all()
+    if not tracked:
+        return
+    live_pos = get_open_positions()
+    live_ids = {p.get('position', {}).get('dealId', '') for p in live_pos}
+
+    for pos in tracked:
+        deal_id = pos['deal_id']
+        if deal_id not in live_ids:
+            exit_price = get_closed_deal_price(deal_id, get_current_price(pos['pair']))
+            if exit_price > 0:
+                result, _ = csv_log_trade(pos, exit_price, pos['stage1_done'],
+                                          pos['stage2_done'], pos['stage3_done'],
+                                          pos['final_locked_r'], 'STOP_OUT')
+                if result != 'ERROR':
+                    db_update(pos['db_key'], result.upper() if result in ('WIN','LOSS','BE') else 'CLOSED', 'STOP_OUT')
+                    op_delete(deal_id)
+            continue
+
+        cur_price = get_current_price(pos['pair'])
+        if cur_price <= 0:
+            continue
+
+        entry   = pos['entry']
+        sl      = pos['sl']
+        tp      = pos['tp']
+        size    = pos['size']
+        dir_    = pos['direction']
+        sl_dist = abs(entry - sl)
+        if sl_dist <= 0:
+            continue
+
+        profit_pts = (cur_price - entry) if dir_ == 'BUY' else (entry - cur_price)
+        profit_r   = profit_pts / sl_dist
+        bars_held  = pos.get('bars_held', 0) + 1
+        op_update(deal_id, bars_held=bars_held)
+        s1, s2, s3 = pos['stage1_done'], pos['stage2_done'], pos['stage3_done']
+
+        if bars_held > MAX_TRADE_DURATION_BARS and profit_r < 0.5:
+            if close_full_api(deal_id):
+                result, _ = csv_log_trade(pos, cur_price, s1, s2, s3, pos['final_locked_r'], 'TIME')
+                db_update(pos['db_key'], result, 'TIME')
+                op_delete(deal_id)
+            continue
+
+        if not s1 and profit_r >= STAGE1_TP_R:
+            partial_size = round(size * STAGE1_PCT, 2)
+            _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
+            if partial_size >= min_sz and close_partial_api(deal_id, partial_size):
+                op_update(deal_id, stage1_done=1)
+
+        elif s1 and not s2 and profit_r >= STAGE2_TP_R:
+            remaining   = size * (1 - STAGE1_PCT)
+            stage2_size = round(remaining * (STAGE2_PCT / (1 - STAGE1_PCT)), 2)
+            _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
+            if stage2_size >= min_sz and close_partial_api(deal_id, stage2_size):
+                new_sl = calculate_sl_at_r(pos, 0.5)
+                if new_sl and update_sl_api(deal_id, new_sl, tp):
+                    op_update(deal_id, stage2_done=1, final_locked_r=0.5, sl=new_sl)
+
+        elif s2 and not s3 and profit_r >= FINAL_TP_R:
+            remaining  = size * (1 - STAGE1_PCT) * (1 - STAGE2_PCT / (1 - STAGE1_PCT))
+            final_size = round(remaining * FINAL_PCT, 2)
+            _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
+            if final_size >= min_sz and close_partial_api(deal_id, final_size):
+                new_sl = calculate_sl_at_r(pos, 2.0)
+                if new_sl and update_sl_api(deal_id, new_sl, tp):
+                    op_update(deal_id, stage3_done=1, final_locked_r=2.0, sl=new_sl)
+
+        elif s2:
+            new_locked_r = get_progressive_lock(profit_r)
+            if new_locked_r > pos['final_locked_r']:
+                new_sl = calculate_sl_at_r(pos, new_locked_r)
+                if new_sl and should_move_sl(pos['sl'], new_sl, dir_) and update_sl_api(deal_id, new_sl, tp):
+                    op_update(deal_id, final_locked_r=new_locked_r, sl=new_sl)
+
+        elif (s3 or profit_r >= TRAILING_START_R) and profit_r > pos.get('last_trail_r', 0) + 0.5:
+            df = fetch_candles(PAIRS[pos['pair']]['epic'], STRATEGY_TF, 50)
+            if not df.empty:
+                atr = float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
+                if atr > 0:
+                    trail_sl = calculate_trailing_sl(pos, cur_price, atr)
+                    if should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
+                        op_update(deal_id, sl=trail_sl, last_trail_r=profit_r)
 
 
 # ═══════════════════════════════════════════════════════
-# [1] POSITION SIZING
+# ✅ SIGNAL DETECTION — SUPERTREND + EMA 20
 # ═══════════════════════════════════════════════════════
-def calc_position_size(risk_usd, sl_dist, contract_size, min_size, max_size):
-    if sl_dist <= 0 or contract_size <= 0: return min_size
-    size = round(risk_usd / (sl_dist * contract_size), 2)
-    return max(min(size, max_size), min_size)
 
-
-# ═══════════════════════════════════════════════════════
-# SIGNAL DETECTION
-# ═══════════════════════════════════════════════════════
-def check_signal(pair_name, config):
+def check_signal(pair_name, config, session_mult, risk_mult):
     epic       = config['epic']
     allow_buy  = config['allow_buy']
     allow_sell = config['allow_sell']
-    if not allow_buy and not allow_sell: return None
+    if not allow_buy and not allow_sell:
+        return None
+
+    vol_regime, vol_mult = check_volatility_regime(epic)
+    if vol_regime == 'EXTREME':
+        return None
+
+    final_risk_mult = session_mult * vol_mult * risk_mult
+    if final_risk_mult < 0.3:
+        return None
 
     df = fetch_candles(epic, STRATEGY_TF, CANDLES_COUNT)
-    if df.empty: return None
+    if df.empty or len(df) < max(SUPERTREND_PERIOD * 3 + ATR_PERIOD, 100):
+        return None
 
-    df_c   = df.iloc[:-1].copy().reset_index(drop=True)
-    atr_s  = calc_atr_series(df_c, ATR_PERIOD)
-    ph_arr = find_pivot_high(df_c['high'], LENGTH)
-    pl_arr = find_pivot_low(df_c['low'],   LENGTH)
+    df_c = df.iloc[:-1].copy().reset_index(drop=True)
+    n    = len(df_c)
 
-    n, upper_tl, lower_tl = len(df_c), None, None
-    for i in range(LENGTH + ATR_PERIOD, n):
-        atr_i = float(atr_s.iloc[i])
-        if np.isnan(atr_i) or atr_i <= 0: continue
-        ph, pl = ph_arr[i], pl_arr[i]
-        if not np.isnan(ph):
-            upper_tl = (i, float(ph),
-                        get_slope_val(SLOPE_METHOD, df_c, i, LENGTH, SLOPE_MULT, atr_s))
-        if not np.isnan(pl):
-            lower_tl = (i, float(pl),
-                        get_slope_val(SLOPE_METHOD, df_c, i, LENGTH, SLOPE_MULT, atr_s))
+    st_line, st_dir = calc_supertrend(df_c, SUPERTREND_PERIOD, SUPERTREND_MULT)
+    ema_20          = calc_ema(df_c['close'], EMA_PERIOD)
 
-    last_idx   = n - 1
-    prev_idx   = n - 2
-    last_close = float(df_c['close'].iloc[last_idx])
-    prev_close = float(df_c['close'].iloc[prev_idx])
-    last_atr   = float(atr_s.iloc[last_idx])
-    if np.isnan(last_atr) or last_atr <= 0: return None
+    li = n - 1
+    lc = float(df_c['close'].iloc[-1])
+    la = float(calc_atr_series(df_c, ATR_PERIOD).iloc[-1])
 
-    # [10] EMA
-    ema_s   = calc_ema(df_c['close'], EMA_PERIOD)
-    ema_val = float(ema_s.iloc[last_idx])
-    if np.isnan(ema_val): return None
-    price_above_ema = last_close > ema_val
-    price_below_ema = last_close < ema_val
-    log(f'  {pair_name}: EMA{EMA_PERIOD}={ema_val:.5f} | '
-        f'{"↑ فوق" if price_above_ema else "↓ تحت"}')
+    if np.isnan(la) or la <= 0:
+        return None
 
-    # [13] RSI
-    rsi_s   = calc_rsi(df_c['close'], RSI_PERIOD)
-    rsi_val = float(rsi_s.iloc[last_idx])
-    if np.isnan(rsi_val): return None
-    log(f'  {pair_name}: RSI={rsi_val:.1f}')
+    st_dir_val = int(st_dir.iloc[li])
+    ema_20_val = float(ema_20.iloc[li])
 
-    # [14] ATR Regime
-    regime_label, regime_ratio = get_atr_regime(atr_s, last_idx, ATR_REGIME_PERIOD)
-    log(f'  {pair_name}: Regime={regime_label} ({regime_ratio:.2f}x)')
+    bid, ask, sp, cs, min_sz, max_sz = get_instrument_meta(epic)
+    if bid <= 0 or sp > la * SPREAD_ATR_MAX:
+        return None
 
-    # [15] Structure
-    structure = get_market_structure(df_c, STRUCTURE_LOOKBACK)
-    log(f'  {pair_name}: Structure={structure}')
+    signal, entry = None, None
 
-    # [4] Spread
-    bid, ask, spread, cs, min_sz, max_sz = get_instrument_meta(epic)
-    if bid <= 0 or ask <= 0: return None
-    if spread / last_atr > MAX_SPREAD_ATR_RATIO:
-        log(f'  {pair_name}: spread كبير — skip'); return None
+    if allow_buy and st_dir_val == 1 and lc > ema_20_val:
+        signal, entry = 'BUY', ask
+        log(f'  {pair_name}: 🟢 BUY | ST↑ | EMA{EMA_PERIOD}: {ema_20_val:.5f}')
 
-    signal = None
+    if not signal and allow_sell and st_dir_val == -1 and lc < ema_20_val:
+        signal, entry = 'SELL', bid
+        log(f'  {pair_name}: 🔴 SELL | ST↓ | EMA{EMA_PERIOD}: {ema_20_val:.5f}')
 
-    # ── BUY ──
-    if allow_buy and upper_tl is not None:
-        ai, av, sl_v = upper_tl
-        if ai < last_idx - 1:
-            u_last = tl_value(ai, av, sl_v, False, last_idx)
-            u_prev = tl_value(ai, av, sl_v, False, prev_idx)
-            if not price_above_ema:
-                log(f'  {pair_name}: ❌ BUY — تحت EMA')
-            elif rsi_val < RSI_BUY_MIN or rsi_val > RSI_OB:
-                log(f'  {pair_name}: ❌ BUY — RSI={rsi_val:.1f}')
-            elif structure == 'BEARISH':
-                log(f'  {pair_name}: ❌ BUY — Structure BEARISH')
-            elif last_close > u_last and prev_close > u_prev:
-                signal = 'BUY'
-                log(f'  {pair_name}: 🟢 BUY ✅ (2-candle confirm)')
-            else:
-                log(f'  {pair_name}: ⏳ BUY — شمعة واحدة فقط')
+    if not signal:
+        return None
 
-    # ── SELL ──
-    if allow_sell and signal is None and lower_tl is not None:
-        ai, av, sl_v = lower_tl
-        if ai < last_idx - 1:
-            l_last = tl_value(ai, av, sl_v, True, last_idx)
-            l_prev = tl_value(ai, av, sl_v, True, prev_idx)
-            if not price_below_ema:
-                log(f'  {pair_name}: ❌ SELL — فوق EMA')
-            elif rsi_val > RSI_SELL_MAX or rsi_val < RSI_OS:
-                log(f'  {pair_name}: ❌ SELL — RSI={rsi_val:.1f}')
-            elif structure == 'BULLISH':
-                log(f'  {pair_name}: ❌ SELL — Structure BULLISH')
-            elif last_close < l_last and prev_close < l_prev:
-                signal = 'SELL'
-                log(f'  {pair_name}: 🔴 SELL ✅ (2-candle confirm)')
-            else:
-                log(f'  {pair_name}: ⏳ SELL — شمعة واحدة فقط')
+    corr_ok, corr_msg = check_correlation_filter(pair_name, signal)
+    if not corr_ok:
+        return None
 
-    if not signal: return None
-
-    entry = ask if signal == 'BUY' else bid
-    sl, tp, sl_m, tp_m = calc_dynamic_sl_tp(
-        signal, entry, last_atr, regime_label, regime_ratio)
-    sl_dist = abs(entry - sl)
-    if sl_dist < last_atr * 0.1: return None
-
-    # ★ [19] حساب TP1 (Partial TP)
-    tp1 = 0.0
-    if PTP_ENABLED:
-        tp1 = round(entry + PTP_TP1_R * sl_dist, 5) if signal == 'BUY' \
-              else round(entry - PTP_TP1_R * sl_dist, 5)
-        log(f'  {pair_name}: TP1={tp1} ({int(PTP_TP1_PCT*100)}% عند {PTP_TP1_R}R)')
-
-    # [16][18] Risk Multiplier
-    risk_mult = get_smart_risk_multiplier(pair_name)
-
-    if config.get('size_override') is not None:
-        size = max(min(float(config['size_override']), max_sz), min_sz)
+    if signal == 'SELL':
+        sl = round(entry + SL_ATR_MULT * la + sp, 5)
+        tp = round(entry - TP_ATR_MULT * la, 5)
     else:
-        risk_usd = ACCOUNT_BALANCE * RISK_PERCENT * risk_mult
-        size     = calc_position_size(risk_usd, sl_dist, cs, min_sz, max_sz)
+        sl = round(entry - SL_ATR_MULT * la - sp, 5)
+        tp = round(entry + TP_ATR_MULT * la, 5)
 
-    log(f'  {pair_name}: size={size} risk≈${round(size*sl_dist*cs,2)} '
-        f'SL×{sl_m:.1f} TP×{tp_m:.1f} Mult={risk_mult}x')
+    sld = abs(entry - sl)
+    if sld < la * 0.1:
+        return None
+
+    dynamic_risk, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+    final_risk = dynamic_risk * final_risk_mult
+
+    sz = config.get('size_override')
+    if sz:
+        size = max(min(float(sz), max_sz), min_sz)
+    else:
+        risk_usd = get_current_balance() * final_risk
+        size     = max(min(round(risk_usd / (sld * cs), 2), max_sz), min_sz)
 
     return {
-        'pair':       pair_name, 'epic': epic,
-        'direction':  signal,
-        'entry':      round(entry, 5),
-        'sl':         sl, 'tp': tp, 'tp1': tp1,
-        'atr':        round(last_atr, 5),
-        'size':       size, 'spread': round(spread, 5),
-        'rsi':        rsi_val, 'structure': structure,
-        'atr_regime': regime_label,
-        'sl_mult':    sl_m, 'tp_mult': tp_m,
-        'risk_mult':  risk_mult,
+        'pair': pair_name, 'epic': epic, 'direction': signal,
+        'entry': round(entry, 5), 'sl': sl, 'tp': tp,
+        'atr': round(la, 5), 'size': size,
+        'spread': round(sp, 5), 'risk_percent': final_risk
     }
 
 
 # ═══════════════════════════════════════════════════════
-# ORDER EXECUTION
+# EXECUTE & SCAN
 # ═══════════════════════════════════════════════════════
+
 def execute_order(sig):
     body = {
-        'epic':           sig['epic'],
-        'direction':      sig['direction'],
-        'size':           sig['size'],
-        'guaranteedStop': False,
-        'trailingStop':   False,
-        'stopLevel':      sig['sl'],
-        'profitLevel':    sig['tp'],
+        'epic': sig['epic'], 'direction': sig['direction'], 'size': sig['size'],
+        'guaranteedStop': False, 'trailingStop': False,
+        'stopLevel': sig['sl'], 'profitLevel': sig['tp']
     }
-    log(f'  📤 {sig["pair"]} {sig["direction"]} | '
-        f'entry≈{sig["entry"]} SL={sig["sl"]} TP={sig["tp"]} size={sig["size"]}')
+    log(f'  📤 {sig["pair"]} | {sig["direction"]} @ {sig["entry"]} | Risk: {sig["risk_percent"]:.2%}')
     r = _post('/api/v1/positions', body)
     if not r:
-        tg_result(sig['pair'], sig['direction'], 'ERROR', 'N/A', 'no response')
         return 'ERROR', 'no response'
     data = r.json()
-    log(f'  RESP [{r.status_code}]: {json.dumps(data)[:200]}')
     if r.status_code == 200:
-        deal_ref = data.get('dealReference', 'N/A')
+        ref = data.get('dealReference', 'N/A')
         time.sleep(2)
-        rc = _get(f'/api/v1/confirms/{deal_ref}')
+        rc = _get(f'/api/v1/confirms/{ref}')
         if rc and rc.status_code == 200:
-            confirm = rc.json()
-            status  = confirm.get('dealStatus', 'UNKNOWN')
-            reason  = confirm.get('reason',     '')
-            tg_result(sig['pair'], sig['direction'], status, deal_ref, reason)
-            return status, deal_ref
-        return 'UNKNOWN', deal_ref
-    err = data.get('errorCode', str(data)[:80])
-    tg_result(sig['pair'], sig['direction'], 'FAILED', 'N/A', err)
-    return 'FAILED', err
+            c       = rc.json()
+            status  = c.get('dealStatus', 'UNKNOWN')
+            deal_id = c.get('dealId', ref)
+            if status in ('ACCEPTED', 'SUCCESS'):
+                db_key = f'{sig["pair"]}_{datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")}'
+                op_save(deal_id, sig['pair'], sig['direction'], sig['entry'],
+                        sig['sl'], sig['tp'], sig['atr'], sig['size'], db_key)
+            return status, ref
+        return 'UNKNOWN', ref
+    return 'FAILED', data.get('errorCode')
 
-
-# ═══════════════════════════════════════════════════════
-# TRADE MANAGEMENT — BE + Trailing + Partial TP
-# ═══════════════════════════════════════════════════════
-def _swing_sl(df_c, direction, lookback):
-    if len(df_c) < lookback: return None
-    recent = df_c.iloc[-lookback:]
-    return (round(float(recent['low'].min()),  5) if direction == 'BUY'
-            else round(float(recent['high'].max()), 5))
-
-def _partial_close(deal_id, size, partial_pct, direction, pair):
-    """
-    ★ [19] يغلق PTP_TP1_PCT% من الحجم عند TP1.
-    Capital.com API: نرسل DELETE بحجم جزئي.
-    """
-    close_size = round(size * partial_pct, 2)
-    if close_size <= 0: return False
-    r = _delete(f'/api/v1/positions/{deal_id}')
-    # ملاحظة: Capital.com لا يدعم partial close عبر DELETE مباشرة،
-    # لذا نستخدم PUT لتعديل TP إلى السعر الحالي بدلاً من ذلك.
-    # الحل العملي: نحرك SL إلى BE بعد TP1 فقط.
-    return True
-
-def manage_open_positions(positions):
+def db_consec_losses(pair):
     with db_lock:
         with sqlite3.connect(DB_FILE) as conn:
-            pending = conn.execute(
-                "SELECT key,pair,direction,entry,sl,tp,atr,size,spread,tp1,risk_mult"
-                " FROM trades WHERE status='PENDING'"
+            rows = conn.execute(
+                "SELECT status FROM trades WHERE pair=? AND status IN ('WIN','LOSS') ORDER BY id DESC LIMIT 8",
+                (pair,)
             ).fetchall()
+            c = 0
+            for r in rows:
+                if r[0] == 'LOSS': c += 1
+                else: break
+            return c
 
-    for row in pending:
-        key, pair, direction, entry, sl, tp, atr, size, spread, tp1, risk_mult = row
-        still_open = any(
-            pos.get('market', {}).get('epic', '') == PAIRS.get(pair, {}).get('epic', '')
-            for pos in positions
-        )
-        if not still_open:
-            epic = PAIRS.get(pair, {}).get('epic', pair)
-            bid, ask, _, _, _, _ = get_instrument_meta(epic)
-            exit_price = bid if direction == 'BUY' else ask
-            if exit_price > 0:
-                result = csv_log_trade(
-                    pair, direction, entry, sl, tp, exit_price,
-                    atr, size, spread=spread,
-                    risk_mult=risk_mult or 1.0,
-                    tp1=tp1 or 0.0,
-                    note='auto-detected close'
-                )
-                db_update(key, result)
-
-    for pos in positions:
-        try:
-            p         = pos.get('position', {})
-            deal_id   = p.get('dealId',    '')
-            direction = p.get('direction', '')
-            entry     = float(p.get('level',     0) or 0)
-            cur_sl    = float(p.get('stopLevel', 0) or 0)
-            cur_size  = float(p.get('size',      0) or 0)
-            epic      = pos.get('market', {}).get('epic', '')
-            if not deal_id or not entry or not epic: continue
-
-            bid, ask, _, _, min_sz, _ = get_instrument_meta(epic)
-            price = bid if direction == 'BUY' else ask
-            if not price: continue
-
-            sl_dist = abs(entry - cur_sl)
-            if sl_dist <= 0: continue
-            profit_r = ((price - entry) if direction == 'BUY'
-                        else (entry - price)) / sl_dist
-
-            df = fetch_candles(epic, STRATEGY_TF, 60)
-            if df.empty: continue
-            df_c    = df.iloc[:-1].copy().reset_index(drop=True)
-            atr_s   = calc_atr_series(df_c, ATR_PERIOD)
-            cur_atr = float(atr_s.iloc[-1])
-            new_sl  = None
-
-            # ══════════════════════════════════════
-            # ★ [19] PARTIAL TAKE PROFIT
-            # ══════════════════════════════════════
-            if PTP_ENABLED and deal_id not in _ptp_done:
-                if profit_r >= PTP_TP1_R:
-                    # Capital.com: نحرك SL إلى BE كبديل عملي عن partial close
-                    be_sl = round(entry, 5)
-                    moved = False
-                    if direction == 'BUY' and cur_sl < be_sl:
-                        new_sl = be_sl; moved = True
-                    elif direction == 'SELL' and cur_sl > be_sl:
-                        new_sl = be_sl; moved = True
-
-                    if moved:
-                        _ptp_done[deal_id] = True
-                        log(f'  💰 PTP TP1 hit! {deal_id} '
-                            f'profit={profit_r:.2f}R → SL=BE={new_sl}')
-                        tg(
-                            f'💰 *Partial TP1* {epic} {direction}\n'
-                            f'Profit: `{profit_r:.2f}R` ≥ `{PTP_TP1_R}R`\n'
-                            f'SL → BE: `{new_sl}` (باقي الصفقة محمية ✅)'
-                        )
-
-            # [2] Break-even
-            if profit_r >= BE_TRIGGER_R and new_sl is None:
-                be_sl = round(entry, 5)
-                if direction == 'BUY'  and cur_sl < be_sl:
-                    new_sl = be_sl
-                    log(f'  🔒 BE {deal_id}: {cur_sl} → {new_sl}')
-                    tg_mgmt(epic, 'BE', cur_sl, new_sl)
-                elif direction == 'SELL' and cur_sl > be_sl:
-                    new_sl = be_sl
-                    log(f'  🔒 BE {deal_id}: {cur_sl} → {new_sl}')
-                    tg_mgmt(epic, 'BE', cur_sl, new_sl)
-
-            # [3] Trailing Stop
-            if profit_r >= TRAIL_TRIGGER_R and cur_atr > 0:
-                base_sl = new_sl or cur_sl
-                if TRAIL_MODE == 'STRUCTURE':
-                    swing = _swing_sl(df_c, direction, SWING_LOOKBACK)
-                    if swing is not None:
-                        better = (swing > base_sl if direction == 'BUY'
-                                  else swing < base_sl)
-                        if better:
-                            new_sl = swing
-                            log(f'  📈 TRAIL(STRUCT) {deal_id}: → {new_sl}')
-                            tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
-                else:
-                    if direction == 'BUY':
-                        atr_sl = round(price - TRAIL_ATR_MULT * cur_atr, 5)
-                        if atr_sl > (new_sl or cur_sl) + 1e-6:
-                            new_sl = atr_sl
-                            log(f'  📈 TRAIL(ATR) {deal_id}: → {new_sl}')
-                            tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
-                    else:
-                        atr_sl = round(price + TRAIL_ATR_MULT * cur_atr, 5)
-                        if atr_sl < (new_sl or cur_sl) - 1e-6:
-                            new_sl = atr_sl
-                            log(f'  📈 TRAIL(ATR) {deal_id}: → {new_sl}')
-                            tg_mgmt(epic, 'TRAIL', cur_sl, new_sl)
-
-            if new_sl is not None:
-                r = _put(f'/api/v1/positions/{deal_id}', {'stopLevel': new_sl})
-                if r: log(f'  SL UPDATE [{r.status_code}]')
-
-        except Exception as ex:
-            log(f'  manage_positions ERROR: {ex}')
-
-
-# ═══════════════════════════════════════════════════════
-# SCAN
-# ═══════════════════════════════════════════════════════
 def run_scan():
     now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        log('⏸  عطلة نهاية الأسبوع'); return
-
-    # [8] Session
-    if not is_trading_session():
-        log(f'⏸  خارج الجلسة — {now.hour:02d}:{now.minute:02d} UTC'); return
-
-    # [9] News
-    if is_news_time():
-        log('📰 خبر قوي — توقف مؤقت')
-        tg('📰 *News Filter* — تجاوز الـ scan'); return
-
-    # ★ [17] Equity Protection
-    allowed, eq_reason = check_equity_protection()
-    if not allowed:
-        log(f'  {eq_reason}')
-        tg(f'🛑 *Equity Protection*\n{eq_reason}')
+    can_trade, reason, session_mult, session_name, day_pnl = should_trade()
+    if not can_trade:
+        log(f'⏸ {reason}')
         return
-
-    # [6] Daily summary
-    if now.hour == 13 and now.minute >= 55:
-        csv_summary(period='daily')
-
-    log('─' * 60)
-    log(f'🔍 Scan v5 | TF={STRATEGY_TF} | {"DEMO" if DEMO_MODE else "LIVE"}'
-        f' | {now.hour:02d}:{now.minute:02d} UTC')
-    log('─' * 60)
-
-    get_balance()
+    log('─' * 50)
+    log(f'🔍 SCAN | {session_name} | Risk: {session_mult:.1f}x')
+    log('─' * 50)
+    get_current_balance()
+    manage_smart_exits()
     open_pos = get_open_positions()
-    log(f'  صفقات مفتوحة: {len(open_pos)} / {MAX_OPEN_TRADES}')
-
-    manage_open_positions(open_pos)
-
+    log(f'  Open: {len(open_pos)}/{MAX_OPEN_TRADES}')
     if len(open_pos) >= MAX_OPEN_TRADES:
-        log('  ⏸  الحد الأقصى للصفقات'); return
-
-    ts_key = now.strftime('%Y-%m-%d_%H')
-
+        return
+    ts_key = now.strftime('%Y-%m-%d_%H%M')
     for pair_name, config in PAIRS.items():
-        consec = db_consec_losses(pair_name)
-        if consec >= MAX_CONSECUTIVE_LOSS:
-            log(f'  {pair_name}: ⚠️ {consec} خسائر — تخطّي'); continue
-
+        if len(open_pos) >= MAX_OPEN_TRADES:
+            break
+        if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS:
+            continue
         key = f'{pair_name}_{ts_key}'
         if db_is_dup(key):
-            log(f'  {pair_name}: ⏸  مكرر'); continue
-
-        log(f'  {pair_name}: فحص ...')
-        sig = check_signal(pair_name, config)
-        if sig is None:
-            log(f'  {pair_name}: لا إشارة'); continue
-
-        db_save(key, pair_name, sig['direction'],
-                sig['entry'], sig['sl'], sig['tp'],
-                sig['atr'], sig['size'], sig['spread'],
-                tp1=sig['tp1'], risk_mult=sig['risk_mult'])
-        tg_signal(sig)
-
+            continue
+        risk_pct, _ = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+        sig = check_signal(pair_name, config, session_mult, risk_pct / BASE_RISK_PERCENT)
+        if not sig:
+            continue
+        db_save(key, pair_name, sig['direction'], sig['entry'], sig['sl'], sig['tp'],
+                sig['atr'], sig['size'], sig['spread'], sig['risk_percent'], session_name)
+        tg_signal(sig, session_name)
         status, ref = execute_order(sig)
         db_update(key, status)
-        log(f'  {pair_name}: {status} | {ref}')
-
+        log(f'  {pair_name}: {status}')
         open_pos = get_open_positions()
-        if len(open_pos) >= MAX_OPEN_TRADES: break
         time.sleep(2)
 
 
 # ═══════════════════════════════════════════════════════
-# ENTRY POINT
+# MAIN LOOP
 # ═══════════════════════════════════════════════════════
-def start_bot():
-    db_init()
-    csv_init()
-    mode = 'DEMO' if DEMO_MODE else 'LIVE'
-    nl   = '\n'
 
-    lines = [
-        f'  TL Breaks Bot v5 [{mode}] — Railway',
-        f'  TF           : {STRATEGY_TF}',
-        f'  EMA          : {EMA_PERIOD} | RSI: {RSI_PERIOD}',
-        f'  SL/TP Base   : {SL_ATR_MULT}/{TP_ATR_MULT}×ATR (dynamic)',
-        f'  Breakout Conf: 2 candles | Structure: ✅',
-        f'  BE           : {BE_TRIGGER_R}R | Trail: {TRAIL_MODE}@{TRAIL_TRIGGER_R}R',
-        f'  Spread       : max {MAX_SPREAD_ATR_RATIO:.0%} ATR',
-        f'  Session      : 09:00–14:00 UTC | News: ±{NEWS_BUFFER_MIN}m',
-        f'  ★ Equity Prot: Day -{DAILY_LOSS_LIMIT:.0%} / +{DAILY_PROFIT_LOCK:.0%}'
-        f' | Week -{WEEKLY_LOSS_LIMIT:.0%}',
-        f'  ★ PerfRisk   : Boost>{PERF_BOOST_WR:.0%}={PERF_BOOST_MULT}x'
-        f' | Cut<{PERF_CUT_WR:.0%}={PERF_CUT_MULT}x (W:{PERF_WINDOW})',
-        f'  ★ Partial TP : TP1@{PTP_TP1_R}R ({int(PTP_TP1_PCT*100)}%)'
-        f' | {"✅" if PTP_ENABLED else "❌"}',
-        f'  Session Mult : {SESSION_RISK_MULTIPLIER}x (off≥{RISK_MULT_MAX_CONSEC_LOSS}L)',
-    ]
-    print('=' * 60, flush=True)
-    for line in lines: print(line, flush=True)
-    for pn, pc in PAIRS.items():
-        b = '✅' if pc['allow_buy']  else '❌'
-        s = '✅' if pc['allow_sell'] else '❌'
-        print(f'  {pn:<8}: BUY={b} SELL={s}', flush=True)
-    print('=' * 60, flush=True)
-
-    tg(
-        f'🚀 *TL Breaks Bot v5* [{mode}]{nl}'
-        f'TF:`{STRATEGY_TF}` | EMA:`{EMA_PERIOD}` | RSI:`{RSI_PERIOD}`{nl}'
-        f'★ Equity: Day`-{DAILY_LOSS_LIMIT:.0%}`/`+{DAILY_PROFIT_LOCK:.0%}`'
-        f' | Week`-{WEEKLY_LOSS_LIMIT:.0%}`{nl}'
-        f'★ PerfRisk: `{PERF_BOOST_MULT}x`/`{PERF_CUT_MULT}x` (W:{PERF_WINDOW}){nl}'
-        f'★ Partial TP: `{PTP_TP1_R}R` ({int(PTP_TP1_PCT*100)}%)'
-        f' `{"ON" if PTP_ENABLED else "OFF"}`{nl}'
-        f'Session:`09-14 UTC` | News:`±{NEWS_BUFFER_MIN}m`{nl}'
-        + ''.join(
-            f'{pn}: BUY={"✅" if pc["allow_buy"] else "❌"} '
-            f'SELL={"✅" if pc["allow_sell"] else "❌"}{nl}'
-            for pn, pc in PAIRS.items()
-        )
-        + f'_{utc_now()}_'
-    )
-
+def main_loop():
     session_age = 0
     while True:
         try:
             if session_age == 0:
                 if not create_session():
-                    time.sleep(60); continue
+                    time.sleep(60)
+                    continue
             else:
                 ping_session()
-            session_age = (session_age + 1) % 25
+            session_age = (session_age + 1) % 15
             run_scan()
-
+            time.sleep(SCAN_INTERVAL)
         except KeyboardInterrupt:
             log('🛑 Bot stopped')
-            csv_summary(period='all')
-            tg('🛑 TL Breaks Bot v5 stopped')
             break
         except Exception as ex:
-            log(f'LOOP ERROR: {ex}')
-            tg(f'❌ Bot Error: `{str(ex)[:100]}`')
+            log(f'ERROR: {ex}')
+            time.sleep(30)
 
-        time.sleep(SCAN_INTERVAL)
+
+# ═══════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════
+
+def start_bot():
+    db_init()
+    csv_init()
+    mode = 'DEMO' if DEMO_MODE else 'LIVE'
+    print('=' * 60, flush=True)
+    print(f'  🚀 Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD} Bot', flush=True)
+    print(f'  Timeframe: M15 | Mode: {mode}', flush=True)
+    print(f'  SL: {SL_ATR_MULT}x ATR | TP: {TP_ATR_MULT}x ATR', flush=True)
+    print('=' * 60, flush=True)
+    nl = '\n'
+    tg(f'🚀 *ST+EMA{EMA_PERIOD} Bot* [{mode}]{nl}'
+       f'Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD}{nl}'
+       f'M15 | SL:{SL_ATR_MULT}xATR | TP:{TP_ATR_MULT}xATR{nl}'
+       f'_{utc_now()}_')
+    main_loop()
 
 
 if __name__ == '__main__':
