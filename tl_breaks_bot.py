@@ -34,7 +34,7 @@ if not all([API_KEY, EMAIL, PASSWORD]):
     )
 
 BASE_URL  = 'https://api-capital.backend-capital.com'
-DEMO_MODE = os.getenv('DEMO_MODE', 'True').lower() == 'true'
+DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'false'
 
 PAIRS = {
     'GOLD':   {'epic': 'GOLD',   'allow_buy': True, 'allow_sell': True, 'size_override': None},
