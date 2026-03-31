@@ -3,7 +3,8 @@
 # ==========================================================
 # multi_pairs_bot_pure_supertrend.py
 # ✅ Supertrend (10,3 | ATR: RMA) + EMA 20
-# ✅ فريم 15 دقيقة - النسخة المحسنة
+# ✅ فريم 15 دقيقة - النسخة المُصلَحة
+# ✅ إصلاح: تكرار الصفقات + فحص الزوج المفتوح + Cache
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
@@ -43,11 +44,10 @@ SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '180'))
 
 # ═══════════════════════════════════════════════════════
 # ✅ SUPERTREND SETTINGS
-# Period=10, Multiplier=3.0, ATR Method=RMA (default)
 # ═══════════════════════════════════════════════════════
 SUPERTREND_PERIOD = int(os.getenv('SUPERTREND_PERIOD', '10'))
 SUPERTREND_MULT   = float(os.getenv('SUPERTREND_MULT', '3.0'))
-ATR_METHOD        = os.getenv('ATR_METHOD', 'RMA')  # RMA (default) أو SMA
+ATR_METHOD        = os.getenv('ATR_METHOD', 'RMA')
 
 EMA_PERIOD     = 20
 ATR_PERIOD     = 14
@@ -91,7 +91,7 @@ MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '6'))
 MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS', '3'))
 ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
 
-_BASE_DIR  = os.getenv('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
+_BASE_DIR = os.getenv('DATA_DIR', '/tmp')
 DB_FILE    = os.path.join(_BASE_DIR, 'multi_bot.db')
 TRADES_CSV = os.path.join(_BASE_DIR, 'trades_log.csv')
 
@@ -115,10 +115,8 @@ def _migrate_database(conn):
         cols = conn.execute("PRAGMA table_info(trades)").fetchall()
         col_names = {c[1] for c in cols}
         new_cols = {
-            'pnl_r': 'REAL DEFAULT 0',
-            'pnl_usd': 'REAL DEFAULT 0',
-            'exit_price': 'REAL',
-            'bars_held': 'INTEGER DEFAULT 0',
+            'pnl_r': 'REAL DEFAULT 0', 'pnl_usd': 'REAL DEFAULT 0',
+            'exit_price': 'REAL', 'bars_held': 'INTEGER DEFAULT 0',
             'risk_percent': 'REAL DEFAULT 0'
         }
         for col, col_type in new_cols.items():
@@ -131,46 +129,22 @@ def _migrate_database(conn):
 def db_init():
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute('''CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY,
-            key TEXT UNIQUE,
-            pair TEXT,
-            direction TEXT,
-            timestamp TEXT,
-            entry REAL,
-            sl REAL,
-            tp REAL,
-            atr REAL,
-            size REAL,
-            spread REAL DEFAULT 0,
-            status TEXT DEFAULT 'PENDING',
-            stage1_done INTEGER DEFAULT 0,
-            stage2_done INTEGER DEFAULT 0,
-            stage3_done INTEGER DEFAULT 0,
-            final_locked_r REAL DEFAULT 0,
-            exit_type TEXT,
-            session_used TEXT,
-            risk_percent REAL,
-            pnl_r REAL DEFAULT 0,
-            pnl_usd REAL DEFAULT 0,
-            exit_price REAL,
-            bars_held INTEGER DEFAULT 0
+            id INTEGER PRIMARY KEY, key TEXT UNIQUE, pair TEXT, direction TEXT,
+            timestamp TEXT, entry REAL, sl REAL, tp REAL, atr REAL, size REAL,
+            spread REAL DEFAULT 0, status TEXT DEFAULT 'PENDING',
+            stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
+            exit_type TEXT, session_used TEXT, risk_percent REAL,
+            pnl_r REAL DEFAULT 0, pnl_usd REAL DEFAULT 0,
+            exit_price REAL, bars_held INTEGER DEFAULT 0
         )''')
         _migrate_database(conn)
         conn.execute('''CREATE TABLE IF NOT EXISTS open_positions (
-            deal_id TEXT PRIMARY KEY,
-            pair TEXT,
-            direction TEXT,
-            entry REAL,
-            sl REAL,
-            tp REAL,
-            atr REAL,
-            size REAL,
-            db_key TEXT,
-            opened_at TEXT,
-            stage1_done INTEGER DEFAULT 0,
-            stage2_done INTEGER DEFAULT 0,
-            stage3_done INTEGER DEFAULT 0,
-            final_locked_r REAL DEFAULT 0,
+            deal_id TEXT PRIMARY KEY, pair TEXT, direction TEXT,
+            entry REAL, sl REAL, tp REAL, atr REAL, size REAL,
+            db_key TEXT, opened_at TEXT,
+            stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
+            stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
             bars_held INTEGER DEFAULT 0
         )''')
         conn.commit()
@@ -303,14 +277,13 @@ def get_pair_stats(pair, lookback=20):
     if avg_loss_r == 0: avg_loss_r = 1
     kelly = (win_rate * (avg_win_r/avg_loss_r) - (1 - win_rate)) / (avg_win_r/avg_loss_r) if avg_win_r > 0 else 0
     kelly = max(0, min(kelly, 0.10))
-    consecutive_wins = consecutive_losses = 0
+    consecutive_losses = 0
     cur_type = None
     cur_consec = 0
     for t in sorted(trades, key=lambda x: x[4]):
         if t[2] == 'WIN':
             if cur_type == 'WIN': cur_consec += 1
             else: cur_consec = 1; cur_type = 'WIN'
-            consecutive_wins = max(consecutive_wins, cur_consec)
         else:
             if cur_type == 'LOSS': cur_consec += 1
             else: cur_consec = 1; cur_type = 'LOSS'
@@ -342,7 +315,7 @@ def check_volatility_regime(epic, tf=STRATEGY_TF):
     df = fetch_candles(epic, tf, 100)
     if df.empty or len(df) < 50:
         return 'NORMAL', 1.0
-    atr_current = calc_atr_series(df.iloc[:-1],  ATR_PERIOD).iloc[-1]
+    atr_current = calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1]
     atr_hist    = calc_atr_series(df.iloc[:-20], ATR_PERIOD).iloc[-20:].mean()
     ratio = atr_current / atr_hist if atr_hist > 0 else 1
     if   ratio > VOLATILITY_THRESHOLDS['EXTREME']: return 'EXTREME', 0.0
@@ -571,7 +544,7 @@ def tg_signal(sig, session_info):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ INDICATORS
+# INDICATORS
 # ═══════════════════════════════════════════════════════
 
 def fetch_candles(epic, resolution, count=500):
@@ -579,7 +552,9 @@ def fetch_candles(epic, resolution, count=500):
     now = time.time()
     if cache_key in _candle_cache:
         cached = _candle_cache[cache_key]
-        if now - cached['ts'] < 60:
+        # ✅ إصلاح 3: 30 ثانية على M15 لتفادي الدخول المتأخر
+        cache_ttl = 30 if 'MINUTE_15' in resolution else 60
+        if now - cached['ts'] < cache_ttl:
             return cached['df']
     r = _get(f'/api/v1/prices/{epic}', params={'resolution': resolution, 'max': count})
     if not r or r.status_code != 200:
@@ -607,11 +582,6 @@ def fetch_candles(epic, resolution, count=500):
 
 
 def calc_atr_series(df, period=14, method=None):
-    """
-    ATR بطريقتين:
-    RMA (default) = EWM  — مطابق لـ TradingView
-    SMA           = Rolling Mean
-    """
     if method is None:
         method = ATR_METHOD
     tr = pd.concat([
@@ -626,12 +596,6 @@ def calc_atr_series(df, period=14, method=None):
 
 
 def calc_supertrend(df, period=10, mult=3.0):
-    """
-    Supertrend الأصلي:
-    Period=10, Mult=3.0, ATR=RMA
-    Buy  = direction  1 (ST تحت السعر)
-    Sell = direction -1 (ST فوق السعر)
-    """
     atr   = calc_atr_series(df, period)
     hl2   = (df['high'] + df['low']) / 2
     upper = (hl2 + mult * atr).values
@@ -793,7 +757,7 @@ def manage_smart_exits():
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ SIGNAL DETECTION — SUPERTREND + EMA 20
+# SIGNAL DETECTION — SUPERTREND + EMA 20
 # ═══════════════════════════════════════════════════════
 
 def check_signal(pair_name, config, session_mult, risk_mult):
@@ -940,26 +904,43 @@ def run_scan():
     log(f'  Open: {len(open_pos)}/{MAX_OPEN_TRADES}')
     if len(open_pos) >= MAX_OPEN_TRADES:
         return
-    ts_key = now.strftime('%Y-%m-%d_%H%M')
+
+    # ✅ إصلاح 1: مفتاح الشمعة — يتغير كل 15 دقيقة فقط (منع التكرار)
+    candle_minute = (now.minute // 15) * 15
+    ts_key = now.strftime('%Y-%m-%d_%H') + f'{candle_minute:02d}'
+
+    # ✅ إصلاح 2: منع صفقة ثانية على نفس الزوج
+    open_epics    = {p.get('market', {}).get('epic', '') for p in open_pos}
+    open_pairs_db = {p['pair'] for p in op_get_all()}
+
     for pair_name, config in PAIRS.items():
         if len(open_pos) >= MAX_OPEN_TRADES:
             break
         if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS:
             continue
+
+        # ✅ إصلاح 2: تخطَّ الزوج إذا كان مفتوحاً
+        if config['epic'] in open_epics or pair_name in open_pairs_db:
+            log(f'  {pair_name}: ⏭ مفتوح بالفعل، تجاوز')
+            continue
+
         key = f'{pair_name}_{ts_key}'
         if db_is_dup(key):
             continue
+
         risk_pct, _ = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
         sig = check_signal(pair_name, config, session_mult, risk_pct / BASE_RISK_PERCENT)
         if not sig:
             continue
+
         db_save(key, pair_name, sig['direction'], sig['entry'], sig['sl'], sig['tp'],
                 sig['atr'], sig['size'], sig['spread'], sig['risk_percent'], session_name)
         tg_signal(sig, session_name)
         status, ref = execute_order(sig)
         db_update(key, status)
         log(f'  {pair_name}: {status}')
-        open_pos = get_open_positions()
+        open_pos      = get_open_positions()
+        open_epics    = {p.get('market', {}).get('epic', '') for p in open_pos}
         time.sleep(2)
 
 
@@ -1000,11 +981,13 @@ def start_bot():
     print(f'  🚀 Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD} Bot', flush=True)
     print(f'  Timeframe: M15 | Mode: {mode}', flush=True)
     print(f'  SL: {SL_ATR_MULT}x ATR | TP: {TP_ATR_MULT}x ATR', flush=True)
+    print(f'  ✅ Fix: No duplicate trades | No double pair | Cache 30s', flush=True)
     print('=' * 60, flush=True)
     nl = '\n'
     tg(f'🚀 *ST+EMA{EMA_PERIOD} Bot* [{mode}]{nl}'
        f'Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD}{nl}'
        f'M15 | SL:{SL_ATR_MULT}xATR | TP:{TP_ATR_MULT}xATR{nl}'
+       f'✅ إصلاح: تكرار الصفقات محلول{nl}'
        f'_{utc_now()}_')
     main_loop()
 
