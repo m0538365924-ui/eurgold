@@ -40,7 +40,7 @@ PAIRS = {
 
 STRATEGY_TF   = 'MINUTE_15'
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '180'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '900'))
 
 # ═══════════════════════════════════════════════════════
 # ✅ SUPERTREND SETTINGS
