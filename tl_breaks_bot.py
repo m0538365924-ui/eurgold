@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==========================================================
-# multi_pairs_bot_pure_supertrend.py
+# multi_pairs_bot_pure_supertrend_v2.py
 # ✅ Supertrend (10,3 | ATR: RMA) + EMA 20
-# ✅ فريم 15 دقيقة - النسخة المُصلَحة
-# ✅ إصلاح: تكرار الصفقات + فحص الزوج المفتوح + Cache
+# ✅ فريم 15 دقيقة
+# ✅ إصلاح: الإغلاق الجزئي عبر Hedge + Working Orders
+# ✅ إضافات: Trailing Stop API | Dynamic Leverage | Session Ping
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
@@ -42,8 +43,12 @@ STRATEGY_TF   = 'MINUTE_15'
 CANDLES_COUNT = 500
 SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
+# ✅ الـ session تنتهي بعد 10 دقائق → نرسل ping كل 8 دقائق
+SESSION_PING_INTERVAL = 480  # ثانية
+_last_ping_time = 0
+
 # ═══════════════════════════════════════════════════════
-# ✅ SUPERTREND SETTINGS
+# SUPERTREND SETTINGS
 # ═══════════════════════════════════════════════════════
 SUPERTREND_PERIOD = int(os.getenv('SUPERTREND_PERIOD', '10'))
 SUPERTREND_MULT   = float(os.getenv('SUPERTREND_MULT', '3.0'))
@@ -85,6 +90,20 @@ STAGE2_TP_R, STAGE2_PCT = 2.5, 0.30
 FINAL_TP_R,  FINAL_PCT  = 3.5, 0.50
 
 PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
+
+# ═══════════════════════════════════════════════════════
+# ✅ إعدادات الإغلاق الجزئي عبر Hedge
+# الفكرة: نفتح صفقة عكسية (Hedge) بحجم الجزء المراد إغلاقه
+# يتطلب تفعيل hedgingMode في حساب Capital.com
+# ═══════════════════════════════════════════════════════
+USE_HEDGE_PARTIAL_CLOSE = os.getenv('USE_HEDGE_PARTIAL', 'true').lower() == 'true'
+
+# ═══════════════════════════════════════════════════════
+# ✅ إعدادات Trailing Stop الأصلي من API
+# عند تفعيله يتولى Capital.com تحريك SL تلقائياً
+# ═══════════════════════════════════════════════════════
+USE_NATIVE_TRAILING_STOP = os.getenv('USE_NATIVE_TRAILING', 'false').lower() == 'true'
+TRAILING_STOP_DISTANCE   = float(os.getenv('TRAILING_STOP_DISTANCE', '0'))  # 0 = يُحسب من ATR
 
 RISK_PERCENT         = float(os.getenv('RISK_PERCENT', '0.01'))
 MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '6'))
@@ -145,7 +164,8 @@ def db_init():
             db_key TEXT, opened_at TEXT,
             stage1_done INTEGER DEFAULT 0, stage2_done INTEGER DEFAULT 0,
             stage3_done INTEGER DEFAULT 0, final_locked_r REAL DEFAULT 0,
-            bars_held INTEGER DEFAULT 0
+            bars_held INTEGER DEFAULT 0,
+            hedge_deal_id TEXT DEFAULT NULL
         )''')
         conn.commit()
 
@@ -376,7 +396,8 @@ def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0, exit
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writerow(row)
         icon = '✅' if result == 'WIN' else ('❌' if result == 'LOSS' else '🔵')
         log(f'  {icon} {pair} {dir_} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R)')
-        nl = '\n'
+        nl = '
+'
         tg(f'{icon} *{pair} {dir_}*{nl}PnL: `${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}_{utc_now()}_')
         return result, pnl_usd
     except Exception as ex:
@@ -430,20 +451,27 @@ def create_session():
                           json={'identifier': EMAIL, 'password': PASSWORD, 'encryptedPassword': False},
                           timeout=15)
         if r.status_code == 200:
+            data = r.json()
             session_headers.update({
                 'X-SECURITY-TOKEN': r.headers.get('X-SECURITY-TOKEN'),
                 'CST':              r.headers.get('CST'),
                 'Content-Type':     'application/json'
             })
-            log('✅ Session OK')
-            return True
+            trailing_enabled = data.get('trailingStopsEnabled', False)
+            log(f'✅ Session OK | trailingStops: {trailing_enabled}')
+            return True, trailing_enabled
         log(f'❌ Session FAILED: {r.status_code}')
     except Exception as ex:
         log(f'❌ Session: {ex}')
-    return False
+    return False, False
 
 def ping_session():
-    _get('/api/v1/ping')
+    global _last_ping_time
+    now = time.time()
+    if now - _last_ping_time >= SESSION_PING_INTERVAL:
+        _get('/api/v1/ping')
+        _last_ping_time = now
+        log('  🏓 Session ping sent')
 
 def get_current_balance():
     global ACCOUNT_BALANCE
@@ -487,16 +515,22 @@ def get_current_price(epic):
 
 def get_closed_deal_price(deal_id, fallback):
     try:
-        r = _get('/api/v1/history/activity', params={'dealId': deal_id, 'pageSize': 10})
+        now_utc = datetime.now(timezone.utc)
+        from_dt = (now_utc - timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S')
+        to_dt   = now_utc.strftime('%Y-%m-%dT%H:%M:%S')
+        r = _get('/api/v1/history/activity', params={
+            'from': from_dt, 'to': to_dt, 'detailed': 'true'
+        })
         if r and r.status_code == 200:
             for act in r.json().get('activities', []):
-                for action in act.get('details', {}).get('actions', []):
-                    if action.get('actionType') in ('POSITION_CLOSED',):
-                        lvl = action.get('level') or action.get('stopLevel') or action.get('dealPrice')
-                        if lvl:
-                            return float(lvl)
-    except Exception:
-        pass
+                if act.get('details', {}).get('dealId') == deal_id:
+                    for action in act.get('details', {}).get('actions', []):
+                        if action.get('actionType') == 'POSITION_CLOSED':
+                            lvl = action.get('level') or action.get('dealPrice')
+                            if lvl:
+                                return float(lvl)
+    except Exception as ex:
+        log(f'  get_closed_deal_price: {ex}')
     return fallback
 
 def update_sl_api(deal_id, new_sl, tp):
@@ -504,18 +538,153 @@ def update_sl_api(deal_id, new_sl, tp):
     if r and r.status_code == 200:
         log(f'  ✅ SL → {new_sl}')
         return True
+    log(f'  ⚠️ SL update failed: {r.status_code if r else "no response"}')
     return False
 
-def close_partial_api(deal_id, size):
-    r = _post(f'/api/v1/positions/{deal_id}', {'size': size})
+def enable_native_trailing_stop(deal_id, stop_distance):
+    r = _put(f'/api/v1/positions/{deal_id}', {
+        'trailingStop': True,
+        'stopDistance': stop_distance
+    })
     if r and r.status_code == 200:
-        log(f'  💰 TP: {size}')
+        log(f'  ✅ Native Trailing Stop enabled | distance: {stop_distance}')
         return True
+    log(f'  ⚠️ Trailing Stop failed: {r.status_code if r else "no response"}')
     return False
 
 def close_full_api(deal_id):
     r = _delete(f'/api/v1/positions/{deal_id}')
     return r and r.status_code == 200
+
+
+# ═══════════════════════════════════════════════════════
+# ✅ الإغلاق الجزئي - الحل الصحيح
+# Capital.com API لا تدعم partial close مباشرة.
+# الحل: فتح صفقة Hedge عكسية بنفس الحجم المراد إغلاقه.
+# يتطلب: تفعيل Hedging Mode عبر PUT /accounts/preferences
+# ═══════════════════════════════════════════════════════
+
+def enable_hedging_mode():
+    r = _put('/api/v1/accounts/preferences', {'hedgingMode': True})
+    if r and r.status_code == 200:
+        log('  ✅ Hedging mode enabled')
+        return True
+    log(f'  ⚠️ Hedging mode failed: {r.status_code if r else "no response"}')
+    return False
+
+def close_partial_hedge(pos, partial_size):
+    if not USE_HEDGE_PARTIAL_CLOSE:
+        log(f'  ⏭ Partial close skipped (hedging disabled)')
+        return False, None
+
+    epic      = PAIRS.get(pos['pair'], {}).get('epic', pos['pair'])
+    direction = 'SELL' if pos['direction'] == 'BUY' else 'BUY'
+
+    body = {
+        'epic':           epic,
+        'direction':      direction,
+        'size':           partial_size,
+        'guaranteedStop': False,
+        'trailingStop':   False,
+    }
+
+    log(f'  💰 Partial Hedge: {direction} {partial_size} {pos["pair"]}')
+    r = _post('/api/v1/positions', body)
+    if not r:
+        return False, None
+
+    if r.status_code == 200:
+        ref = r.json().get('dealReference', '')
+        time.sleep(1)
+        rc = _get(f'/api/v1/confirms/{ref}')
+        if rc and rc.status_code == 200:
+            c       = rc.json()
+            status  = c.get('dealStatus', 'UNKNOWN')
+            deal_id = c.get('dealId', ref)
+            if status in ('ACCEPTED', 'SUCCESS'):
+                log(f'  ✅ Partial hedge opened: {deal_id}')
+                return True, deal_id
+        return False, None
+
+    if r.status_code in (400, 403):
+        log(f'  🔄 Hedging not enabled, attempting to enable...')
+        if enable_hedging_mode():
+            time.sleep(1)
+            r2 = _post('/api/v1/positions', body)
+            if r2 and r2.status_code == 200:
+                ref = r2.json().get('dealReference', '')
+                time.sleep(1)
+                rc = _get(f'/api/v1/confirms/{ref}')
+                if rc and rc.status_code == 200:
+                    c       = rc.json()
+                    status  = c.get('dealStatus', 'UNKNOWN')
+                    deal_id = c.get('dealId', ref)
+                    if status in ('ACCEPTED', 'SUCCESS'):
+                        log(f'  ✅ Partial hedge opened after enable: {deal_id}')
+                        return True, deal_id
+
+    log(f'  ❌ Partial close failed: {r.status_code} | {r.text[:200]}')
+    return False, None
+
+def close_partial_and_close_hedge(pos, partial_size):
+    old_hedge = pos.get('hedge_deal_id')
+    if old_hedge:
+        close_full_api(old_hedge)
+        op_update(pos['deal_id'], hedge_deal_id=None)
+    return close_partial_hedge(pos, partial_size)
+
+
+# ═══════════════════════════════════════════════════════
+# ✅ تعديل الـ Leverage ديناميكياً حسب الجلسة
+# ═══════════════════════════════════════════════════════
+
+LEVERAGE_MAP = {
+    'CURRENCIES':      [1, 10, 20, 30],
+    'INDICES':         [1, 10, 20],
+    'CRYPTOCURRENCIES':[1, 2],
+    'COMMODITIES':     [1, 5, 10, 20],
+    'SHARES':          [1, 2, 3, 5],
+}
+
+PAIR_INSTRUMENT_TYPE = {
+    'GOLD':   'COMMODITIES',
+    'BTCUSD': 'CRYPTOCURRENCIES',
+    'EURUSD': 'CURRENCIES',
+    'GBPUSD': 'CURRENCIES',
+    'US100':  'INDICES',
+    'US500':  'INDICES',
+}
+
+def get_account_preferences():
+    r = _get('/api/v1/accounts/preferences')
+    if r and r.status_code == 200:
+        return r.json()
+    return {}
+
+def set_leverage_for_session(session_mult):
+    prefs = get_account_preferences()
+    if not prefs:
+        return
+    leverages = prefs.get('leverages', {})
+    updated   = {}
+    for instr_type, available in LEVERAGE_MAP.items():
+        current = leverages.get(instr_type, available[0])
+        if session_mult >= 1.5:
+            target = max(available)
+        elif session_mult <= 0.5:
+            target = min(available)
+        else:
+            mid_idx = len(available) // 2
+            target  = available[mid_idx]
+        if target != current:
+            updated[instr_type] = target
+    if updated:
+        new_leverages = {**leverages, **updated}
+        r = _put('/api/v1/accounts/preferences', {'leverages': new_leverages})
+        if r and r.status_code == 200:
+            log(f'  ✅ Leverage updated for session {session_mult}x: {updated}')
+        else:
+            log(f'  ⚠️ Leverage update failed: {r.status_code if r else "no response"}')
 
 
 # ═══════════════════════════════════════════════════════
@@ -534,7 +703,8 @@ def tg(text):
 def tg_signal(sig, session_info):
     icon = '🟢' if sig['direction'] == 'BUY' else '🔴'
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
-    nl   = '\n'
+    nl   = '
+'
     tg(f'{icon} *{sig["pair"]} {sig["direction"]}* [{mode}]{nl}'
        f'Entry: `{sig["entry"]}` | SL: `{sig["sl"]}` | TP: `{sig["tp"]}`{nl}'
        f'Risk: `{sig["risk_percent"]:.2%}`{nl}'
@@ -552,7 +722,6 @@ def fetch_candles(epic, resolution, count=500):
     now = time.time()
     if cache_key in _candle_cache:
         cached = _candle_cache[cache_key]
-        # ✅ إصلاح 3: 30 ثانية على M15 لتفادي الدخول المتأخر
         cache_ttl = 30 if 'MINUTE_15' in resolution else 60
         if now - cached['ts'] < cache_ttl:
             return cached['df']
@@ -678,9 +847,17 @@ def manage_smart_exits():
 
     for pos in tracked:
         deal_id = pos['deal_id']
+
+        is_hedge = any(p.get('hedge_deal_id') == deal_id for p in tracked if p['deal_id'] != deal_id)
+        if is_hedge:
+            continue
+
         if deal_id not in live_ids:
             exit_price = get_closed_deal_price(deal_id, get_current_price(pos['pair']))
             if exit_price > 0:
+                hedge_id = pos.get('hedge_deal_id')
+                if hedge_id and hedge_id in live_ids:
+                    close_full_api(hedge_id)
                 result, _ = csv_log_trade(pos, exit_price, pos['stage1_done'],
                                           pos['stage2_done'], pos['stage3_done'],
                                           pos['final_locked_r'], 'STOP_OUT')
@@ -715,29 +892,38 @@ def manage_smart_exits():
                 op_delete(deal_id)
             continue
 
+        _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
+
         if not s1 and profit_r >= STAGE1_TP_R:
             partial_size = round(size * STAGE1_PCT, 2)
-            _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
-            if partial_size >= min_sz and close_partial_api(deal_id, partial_size):
-                op_update(deal_id, stage1_done=1)
+            if partial_size >= min_sz:
+                ok, hedge_id = close_partial_and_close_hedge(pos, partial_size)
+                if ok:
+                    op_update(deal_id, stage1_done=1, hedge_deal_id=hedge_id)
+                    log(f'  📊 Stage1 done | Hedge: {hedge_id}')
+                    tg(f'📊 *{pos["pair"]} Stage1* | Hedge 50% @ `{cur_price}` | R: `{profit_r:.1f}`')
 
         elif s1 and not s2 and profit_r >= STAGE2_TP_R:
             remaining   = size * (1 - STAGE1_PCT)
             stage2_size = round(remaining * (STAGE2_PCT / (1 - STAGE1_PCT)), 2)
-            _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
-            if stage2_size >= min_sz and close_partial_api(deal_id, stage2_size):
-                new_sl = calculate_sl_at_r(pos, 0.5)
-                if new_sl and update_sl_api(deal_id, new_sl, tp):
-                    op_update(deal_id, stage2_done=1, final_locked_r=0.5, sl=new_sl)
+            if stage2_size >= min_sz:
+                ok, hedge_id = close_partial_and_close_hedge(pos, stage2_size)
+                if ok:
+                    new_sl = calculate_sl_at_r(pos, 0.5)
+                    if new_sl and update_sl_api(deal_id, new_sl, tp):
+                        op_update(deal_id, stage2_done=1, final_locked_r=0.5, sl=new_sl, hedge_deal_id=hedge_id)
+                        log(f'  📊 Stage2 done | SL → +0.5R | Hedge: {hedge_id}')
 
         elif s2 and not s3 and profit_r >= FINAL_TP_R:
             remaining  = size * (1 - STAGE1_PCT) * (1 - STAGE2_PCT / (1 - STAGE1_PCT))
             final_size = round(remaining * FINAL_PCT, 2)
-            _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
-            if final_size >= min_sz and close_partial_api(deal_id, final_size):
-                new_sl = calculate_sl_at_r(pos, 2.0)
-                if new_sl and update_sl_api(deal_id, new_sl, tp):
-                    op_update(deal_id, stage3_done=1, final_locked_r=2.0, sl=new_sl)
+            if final_size >= min_sz:
+                ok, hedge_id = close_partial_and_close_hedge(pos, final_size)
+                if ok:
+                    new_sl = calculate_sl_at_r(pos, 2.0)
+                    if new_sl and update_sl_api(deal_id, new_sl, tp):
+                        op_update(deal_id, stage3_done=1, final_locked_r=2.0, sl=new_sl, hedge_deal_id=hedge_id)
+                        log(f'  📊 Stage3 done | SL → +2R')
 
         elif s2:
             new_locked_r = get_progressive_lock(profit_r)
@@ -751,9 +937,14 @@ def manage_smart_exits():
             if not df.empty:
                 atr = float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
                 if atr > 0:
-                    trail_sl = calculate_trailing_sl(pos, cur_price, atr)
-                    if should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
-                        op_update(deal_id, sl=trail_sl, last_trail_r=profit_r)
+                    if USE_NATIVE_TRAILING_STOP:
+                        stop_distance = round(atr * TRAILING_ATR_MULT, 5)
+                        if enable_native_trailing_stop(deal_id, stop_distance):
+                            op_update(deal_id, last_trail_r=profit_r)
+                    else:
+                        trail_sl = calculate_trailing_sl(pos, cur_price, atr)
+                        if should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
+                            op_update(deal_id, sl=trail_sl, last_trail_r=profit_r)
 
 
 # ═══════════════════════════════════════════════════════
@@ -851,10 +1042,19 @@ def check_signal(pair_name, config, session_mult, risk_mult):
 
 def execute_order(sig):
     body = {
-        'epic': sig['epic'], 'direction': sig['direction'], 'size': sig['size'],
-        'guaranteedStop': False, 'trailingStop': False,
-        'stopLevel': sig['sl'], 'profitLevel': sig['tp']
+        'epic':           sig['epic'],
+        'direction':      sig['direction'],
+        'size':           sig['size'],
+        'guaranteedStop': False,
+        'trailingStop':   USE_NATIVE_TRAILING_STOP,
+        'stopLevel':      sig['sl'],
+        'profitLevel':    sig['tp']
     }
+    if USE_NATIVE_TRAILING_STOP:
+        atr_dist = round(sig['atr'] * SL_ATR_MULT, 5)
+        body.pop('stopLevel', None)
+        body['stopDistance'] = TRAILING_STOP_DISTANCE if TRAILING_STOP_DISTANCE > 0 else atr_dist
+
     log(f'  📤 {sig["pair"]} | {sig["direction"]} @ {sig["entry"]} | Risk: {sig["risk_percent"]:.2%}')
     r = _post('/api/v1/positions', body)
     if not r:
@@ -899,17 +1099,18 @@ def run_scan():
     log(f'🔍 SCAN | {session_name} | Risk: {session_mult:.1f}x')
     log('─' * 50)
     get_current_balance()
+
+    set_leverage_for_session(session_mult)
+
     manage_smart_exits()
     open_pos = get_open_positions()
     log(f'  Open: {len(open_pos)}/{MAX_OPEN_TRADES}')
     if len(open_pos) >= MAX_OPEN_TRADES:
         return
 
-    # ✅ إصلاح 1: مفتاح الشمعة — يتغير كل 15 دقيقة فقط (منع التكرار)
     candle_minute = (now.minute // 15) * 15
     ts_key = now.strftime('%Y-%m-%d_%H') + f'{candle_minute:02d}'
 
-    # ✅ إصلاح 2: منع صفقة ثانية على نفس الزوج
     open_epics    = {p.get('market', {}).get('epic', '') for p in open_pos}
     open_pairs_db = {p['pair'] for p in op_get_all()}
 
@@ -919,7 +1120,6 @@ def run_scan():
         if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS:
             continue
 
-        # ✅ إصلاح 2: تخطَّ الزوج إذا كان مفتوحاً
         if config['epic'] in open_epics or pair_name in open_pairs_db:
             log(f'  {pair_name}: ⏭ مفتوح بالفعل، تجاوز')
             continue
@@ -949,23 +1149,30 @@ def run_scan():
 # ═══════════════════════════════════════════════════════
 
 def main_loop():
-    session_age = 0
+    trailing_stops_available = False
+    session_created = False
+
     while True:
         try:
-            if session_age == 0:
-                if not create_session():
+            if not session_created:
+                ok, trailing_avail = create_session()
+                if not ok:
                     time.sleep(60)
                     continue
+                session_created          = True
+                trailing_stops_available = trailing_avail
             else:
                 ping_session()
-            session_age = (session_age + 1) % 15
+
             run_scan()
             time.sleep(SCAN_INTERVAL)
+
         except KeyboardInterrupt:
             log('🛑 Bot stopped')
             break
         except Exception as ex:
             log(f'ERROR: {ex}')
+            session_created = False
             time.sleep(30)
 
 
@@ -978,16 +1185,18 @@ def start_bot():
     csv_init()
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
     print('=' * 60, flush=True)
-    print(f'  🚀 Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD} Bot', flush=True)
+    print(f'  🚀 Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD} Bot v2', flush=True)
     print(f'  Timeframe: M15 | Mode: {mode}', flush=True)
     print(f'  SL: {SL_ATR_MULT}x ATR | TP: {TP_ATR_MULT}x ATR', flush=True)
-    print(f'  ✅ Fix: No duplicate trades | No double pair | Cache 30s', flush=True)
+    print(f'  ✅ Partial Close: Hedge Method | Trailing: {"Native API" if USE_NATIVE_TRAILING_STOP else "Manual"}', flush=True)
+    print(f'  ✅ Dynamic Leverage | Session Ping every {SESSION_PING_INTERVAL}s', flush=True)
     print('=' * 60, flush=True)
-    nl = '\n'
-    tg(f'🚀 *ST+EMA{EMA_PERIOD} Bot* [{mode}]{nl}'
+    nl = '
+'
+    tg(f'🚀 *ST+EMA{EMA_PERIOD} Bot v2* [{mode}]{nl}'
        f'Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD}{nl}'
        f'M15 | SL:{SL_ATR_MULT}xATR | TP:{TP_ATR_MULT}xATR{nl}'
-       f'✅ إصلاح: تكرار الصفقات محلول{nl}'
+       f'✅ Partial Close: Hedge | Dynamic Leverage{nl}'
        f'_{utc_now()}_')
     main_loop()
 
