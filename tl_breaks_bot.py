@@ -46,7 +46,7 @@ DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
 # ═══════════════════════════════════════════════════════
 PAIRS = {
     'GOLD': {'epic': 'GOLD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
-    'BTCUSD': {'epic': 'BTCUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
+    'USDCAD': {'epic': 'USDCAD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
     'EURUSD': {'epic': 'EURUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
     'GBPUSD': {'epic': 'GBPUSD', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
     'US100': {'epic': 'US100', 'allow_buy': True, 'allow_sell': True, 'size_override': None},
@@ -101,7 +101,7 @@ PAIR_INFO = {
 
 STRATEGY_TF = 'MINUTE_15'
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '1800'))
 
 # ✅ Session ping with thread safety
 SESSION_PING_INTERVAL = 480  # 8 minutes
