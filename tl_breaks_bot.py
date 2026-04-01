@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 # ==========================================================
 # multi_pairs_bot_pure_supertrend_v2.py
-# âœ… Supertrend (10,3 | ATR: RMA) + EMA 20
-# âœ… ÙØ±ÙŠÙ… 15 Ø¯Ù‚ÙŠÙ‚Ø©
-# âœ… Ø¥ØµÙ„Ø§Ø­: Ø§Ù„Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¬Ø²Ø¦ÙŠ Ø¹Ø¨Ø± Hedge + Working Orders
-# âœ… Ø¥Ø¶Ø§ÙØ§Øª: Trailing Stop API | Dynamic Leverage | Session Ping
+# ✅ Supertrend (10,3 | ATR: RMA) + EMA 20
+# ✅ فريم 15 دقيقة
+# ✅ إصلاح: الإغلاق الجزئي عبر Hedge + Working Orders
+# ✅ إضافات: Trailing Stop API | Dynamic Leverage | Session Ping
 # ==========================================================
 
 import os, csv, json, time, sqlite3, requests
@@ -18,9 +18,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # CONFIG
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 API_KEY    = os.getenv('CAPITAL_API_KEY',  'BbmFhEF3FffkcR0Y')
 EMAIL      = os.getenv('CAPITAL_EMAIL',    'almorese2013@gmail.com')
 PASSWORD   = os.getenv('CAPITAL_PASSWORD', 'Ba050326>')
@@ -43,13 +43,13 @@ STRATEGY_TF   = 'MINUTE_15'
 CANDLES_COUNT = 500
 SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
-# âœ… Ø§Ù„Ù€ session ØªÙ†ØªÙ‡ÙŠ Ø¨Ø¹Ø¯ 10 Ø¯Ù‚Ø§Ø¦Ù‚ â†’ Ù†Ø±Ø³Ù„ ping ÙƒÙ„ 8 Ø¯Ù‚Ø§Ø¦Ù‚
-SESSION_PING_INTERVAL = 480  # Ø«Ø§Ù†ÙŠØ©
+# ✅ الـ session تنتهي بعد 10 دقائق → نرسل ping كل 8 دقائق
+SESSION_PING_INTERVAL = 480  # ثانية
 _last_ping_time = 0
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # SUPERTREND SETTINGS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 SUPERTREND_PERIOD = int(os.getenv('SUPERTREND_PERIOD', '10'))
 SUPERTREND_MULT   = float(os.getenv('SUPERTREND_MULT', '3.0'))
 ATR_METHOD        = os.getenv('ATR_METHOD', 'RMA')
@@ -60,9 +60,9 @@ SL_ATR_MULT    = 1.5
 TP_ATR_MULT    = 3.0
 SPREAD_ATR_MAX = 0.25
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # RISK MANAGEMENT
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 BASE_RISK_PERCENT   = 0.01
 KELLY_FRACTION      = 0.25
 MAX_RISK_PERCENT    = 0.03
@@ -72,12 +72,12 @@ MAX_WEEKLY_RISK     = 0.10
 DAILY_PROFIT_TARGET = 0.03
 
 SESSIONS = {
-    'ASIA':        {'start': 0,  'end': 7,  'risk_mult': 0.5, 'name': 'Ø¢Ø³ÙŠØ§ (Ù‡Ø§Ø¯Ø¦)'},
-    'LONDON_OPEN': {'start': 7,  'end': 10, 'risk_mult': 1.2, 'name': 'ÙØªØ­ Ù„Ù†Ø¯Ù†'},
-    'LONDON_MID':  {'start': 10, 'end': 12, 'risk_mult': 1.0, 'name': 'Ù…Ù†ØªØµÙ Ù„Ù†Ø¯Ù†'},
-    'LONDON_NY':   {'start': 12, 'end': 16, 'risk_mult': 1.5, 'name': 'ØªØ¯Ø§Ø®Ù„ Ù„Ù†Ø¯Ù†-Ù†ÙŠÙˆÙŠÙˆØ±Ùƒ â­'},
-    'NY_PM':       {'start': 16, 'end': 20, 'risk_mult': 0.7, 'name': 'Ø¨Ø¹Ø¯ Ø§Ù„Ø¸Ù‡Ø± Ø§Ù„Ø£Ù…Ø±ÙŠÙƒÙŠ'},
-    'QUIET':       {'start': 20, 'end': 24, 'risk_mult': 0.3, 'name': 'Ù‡Ø§Ø¯Ø¦'},
+    'ASIA':        {'start': 0,  'end': 7,  'risk_mult': 0.5, 'name': 'آسيا (هادئ)'},
+    'LONDON_OPEN': {'start': 7,  'end': 10, 'risk_mult': 1.2, 'name': 'فتح لندن'},
+    'LONDON_MID':  {'start': 10, 'end': 12, 'risk_mult': 1.0, 'name': 'منتصف لندن'},
+    'LONDON_NY':   {'start': 12, 'end': 16, 'risk_mult': 1.5, 'name': 'تداخل لندن-نيويورك ⭐'},
+    'NY_PM':       {'start': 16, 'end': 20, 'risk_mult': 0.7, 'name': 'بعد الظهر الأمريكي'},
+    'QUIET':       {'start': 20, 'end': 24, 'risk_mult': 0.3, 'name': 'هادئ'},
 }
 
 VOLATILITY_THRESHOLDS   = {'EXTREME': 2.0, 'HIGH': 1.5, 'LOW': 0.6}
@@ -91,19 +91,19 @@ FINAL_TP_R,  FINAL_PCT  = 3.5, 0.50
 
 PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# âœ… Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¬Ø²Ø¦ÙŠ Ø¹Ø¨Ø± Hedge
-# Ø§Ù„ÙÙƒØ±Ø©: Ù†ÙØªØ­ ØµÙÙ‚Ø© Ø¹ÙƒØ³ÙŠØ© (Hedge) Ø¨Ø­Ø¬Ù… Ø§Ù„Ø¬Ø²Ø¡ Ø§Ù„Ù…Ø±Ø§Ø¯ Ø¥ØºÙ„Ø§Ù‚Ù‡
-# ÙŠØªØ·Ù„Ø¨ ØªÙØ¹ÙŠÙ„ hedgingMode ÙÙŠ Ø­Ø³Ø§Ø¨ Capital.com
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
+# ✅ إعدادات الإغلاق الجزئي عبر Hedge
+# الفكرة: نفتح صفقة عكسية (Hedge) بحجم الجزء المراد إغلاقه
+# يتطلب تفعيل hedgingMode في حساب Capital.com
+# ═══════════════════════════════════════════════════════
 USE_HEDGE_PARTIAL_CLOSE = os.getenv('USE_HEDGE_PARTIAL', 'true').lower() == 'true'
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# âœ… Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Trailing Stop Ø§Ù„Ø£ØµÙ„ÙŠ Ù…Ù† API
-# Ø¹Ù†Ø¯ ØªÙØ¹ÙŠÙ„Ù‡ ÙŠØªÙˆÙ„Ù‰ Capital.com ØªØ­Ø±ÙŠÙƒ SL ØªÙ„Ù‚Ø§Ø¦ÙŠØ§Ù‹
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
+# ✅ إعدادات Trailing Stop الأصلي من API
+# عند تفعيله يتولى Capital.com تحريك SL تلقائياً
+# ═══════════════════════════════════════════════════════
 USE_NATIVE_TRAILING_STOP = os.getenv('USE_NATIVE_TRAILING', 'false').lower() == 'true'
-TRAILING_STOP_DISTANCE   = float(os.getenv('TRAILING_STOP_DISTANCE', '0'))  # 0 = ÙŠÙØ­Ø³Ø¨ Ù…Ù† ATR
+TRAILING_STOP_DISTANCE   = float(os.getenv('TRAILING_STOP_DISTANCE', '0'))  # 0 = يُحسب من ATR
 
 RISK_PERCENT         = float(os.getenv('RISK_PERCENT', '0.01'))
 MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '6'))
@@ -125,9 +125,9 @@ CSV_HEADERS = [
 ]
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # DATABASE
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def _migrate_database(conn):
     try:
@@ -141,9 +141,9 @@ def _migrate_database(conn):
         for col, col_type in new_cols.items():
             if col not in col_names:
                 conn.execute(f'ALTER TABLE trades ADD COLUMN {col} {col_type}')
-                log(f'  âœ… DB: added {col}')
+                log(f'  ✅ DB: added {col}')
     except Exception as ex:
-        log(f'  âš ï¸ DB: {ex}')
+        log(f'  ⚠️ DB: {ex}')
 
 def db_init():
     with sqlite3.connect(DB_FILE) as conn:
@@ -217,7 +217,7 @@ def _update_trade_pnl(db_key, pnl_r, pnl_usd, exit_price, bars_held):
                 )
                 conn.commit()
             except Exception as ex:
-                log(f'  âš ï¸ PnL update: {ex}')
+                log(f'  ⚠️ PnL update: {ex}')
 
 def op_save(deal_id, pair, direction, entry, sl, tp, atr, size, db_key):
     with db_lock:
@@ -253,9 +253,9 @@ def op_delete(deal_id):
             conn.commit()
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # RISK MANAGEMENT
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def calculate_pnl_since(since_dt):
     with db_lock:
@@ -276,13 +276,13 @@ def check_drawdown_limits():
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_pnl   = calculate_pnl_since(day_start)
     if day_pnl <= -balance * MAX_DAILY_RISK:
-        return False, f'ðŸ›‘ DAILY LIMIT: {day_pnl/balance:.1%}', 0.0
+        return False, f'🛑 DAILY LIMIT: {day_pnl/balance:.1%}', 0.0
     if day_pnl >= balance * DAILY_PROFIT_TARGET:
-        return False, f'ðŸ”’ DAILY TARGET: +{day_pnl/balance:.1%}', 0.0
+        return False, f'🔒 DAILY TARGET: +{day_pnl/balance:.1%}', 0.0
     week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0)
     week_pnl   = calculate_pnl_since(week_start)
     if week_pnl <= -balance * MAX_WEEKLY_RISK:
-        return False, f'ðŸ›‘ WEEKLY LIMIT: {week_pnl/balance:.1%}', 0.0
+        return False, f'🛑 WEEKLY LIMIT: {week_pnl/balance:.1%}', 0.0
     return True, 'OK', day_pnl
 
 def get_pair_stats(pair, lookback=20):
@@ -320,16 +320,16 @@ def calculate_dynamic_risk(pair, base_risk=BASE_RISK_PERCENT):
     return max(MIN_RISK_PERCENT, min(risk, MAX_RISK_PERCENT)), 'dynamic'
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # SESSION & VOLATILITY
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def get_session_info():
     hour = datetime.now(timezone.utc).hour
     for session_name, config in SESSIONS.items():
         if config['start'] <= hour < config['end']:
             return config['risk_mult'], config['name'], session_name
-    return 0.0, 'Ù…ØºÙ„Ù‚Ø©', 'CLOSED'
+    return 0.0, 'مغلقة', 'CLOSED'
 
 def check_volatility_regime(epic, tf=STRATEGY_TF):
     df = fetch_candles(epic, tf, 100)
@@ -349,13 +349,13 @@ def should_trade():
         return False, reason, 0.0, None, 0.0
     session_mult, session_name, session_code = get_session_info()
     if session_mult == 0:
-        return False, f'â¸ Session: {session_name}', 0.0, None, 0.0
+        return False, f'⏸ Session: {session_name}', 0.0, None, 0.0
     return True, 'OK', session_mult, session_name, day_pnl
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # HELPERS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def utc_now():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
@@ -394,9 +394,9 @@ def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0, exit
         }
         with open(TRADES_CSV, 'a', newline='', encoding='utf-8-sig') as f:
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writerow(row)
-        icon = 'âœ…' if result == 'WIN' else ('âŒ' if result == 'LOSS' else 'ðŸ”µ')
+        icon = '✅' if result == 'WIN' else ('❌' if result == 'LOSS' else '🔵')
         log(f'  {icon} {pair} {dir_} | PnL=${pnl_usd:+.2f} ({pnl_r:+.2f}R)')
-        nl = chr(10)
+        nl = '\n'
         tg(f'{icon} *{pair} {dir_}*{nl}PnL: `${pnl_usd:+.2f}` | `{pnl_r:+.2f}R`{nl}_{utc_now()}_')
         return result, pnl_usd
     except Exception as ex:
@@ -404,9 +404,9 @@ def csv_log_trade(pos, exit_price, stage1=0, stage2=0, stage3=0, final_r=0, exit
         return 'ERROR', 0
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # API HELPERS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def _get(path, params=None, retries=3):
     for attempt in range(retries):
@@ -456,23 +456,21 @@ def create_session():
                 'CST':              r.headers.get('CST'),
                 'Content-Type':     'application/json'
             })
-            # âœ… ØªØ®Ø²ÙŠÙ† trailingStopsEnabled Ù…Ù† Ù†ØªÙŠØ¬Ø© Ø§Ù„Ù€ session
             trailing_enabled = data.get('trailingStopsEnabled', False)
-            log(f'âœ… Session OK | trailingStops: {trailing_enabled}')
+            log(f'✅ Session OK | trailingStops: {trailing_enabled}')
             return True, trailing_enabled
-        log(f'âŒ Session FAILED: {r.status_code}')
+        log(f'❌ Session FAILED: {r.status_code}')
     except Exception as ex:
-        log(f'âŒ Session: {ex}')
+        log(f'❌ Session: {ex}')
     return False, False
 
-# âœ… Ø¥ØµÙ„Ø§Ø­: ping ÙŠÙØ±Ø³ÙŽÙ„ ÙƒÙ„ 8 Ø¯Ù‚Ø§Ø¦Ù‚ Ù„Ù…Ù†Ø¹ Ø§Ù†ØªÙ‡Ø§Ø¡ Ø§Ù„Ù€ session (Ø§Ù„Ù€ timeout = 10 Ø¯Ù‚Ø§Ø¦Ù‚)
 def ping_session():
     global _last_ping_time
     now = time.time()
     if now - _last_ping_time >= SESSION_PING_INTERVAL:
         _get('/api/v1/ping')
         _last_ping_time = now
-        log('  ðŸ“ Session ping sent')
+        log('  🏓 Session ping sent')
 
 def get_current_balance():
     global ACCOUNT_BALANCE
@@ -514,7 +512,6 @@ def get_current_price(epic):
     meta = get_instrument_meta(epic)
     return (meta[0] + meta[1]) / 2 if meta[0] > 0 else 0
 
-# âœ… Ø¥ØµÙ„Ø§Ø­: Ø§Ø³ØªØ®Ø¯Ø§Ù… from/to Ø¨Ø¯Ù„Ø§Ù‹ Ù…Ù† pageSize ØºÙŠØ± Ø§Ù„Ù…Ø¯Ø¹ÙˆÙ…
 def get_closed_deal_price(deal_id, fallback):
     try:
         now_utc = datetime.now(timezone.utc)
@@ -538,25 +535,20 @@ def get_closed_deal_price(deal_id, fallback):
 def update_sl_api(deal_id, new_sl, tp):
     r = _put(f'/api/v1/positions/{deal_id}', {'stopLevel': new_sl, 'profitLevel': tp})
     if r and r.status_code == 200:
-        log(f'  âœ… SL â†’ {new_sl}')
+        log(f'  ✅ SL → {new_sl}')
         return True
-    log(f'  âš ï¸ SL update failed: {r.status_code if r else "no response"}')
+    log(f'  ⚠️ SL update failed: {r.status_code if r else "no response"}')
     return False
 
-# âœ… ØªÙØ¹ÙŠÙ„ Trailing Stop Ø§Ù„Ø£ØµÙ„ÙŠ Ù…Ù† API Ø¹Ø¨Ø± PUT
 def enable_native_trailing_stop(deal_id, stop_distance):
-    """
-    ØªØ­ÙˆÙŠÙ„ SL Ø§Ù„Ø«Ø§Ø¨Øª Ø¥Ù„Ù‰ Trailing Stop ØªÙ„Ù‚Ø§Ø¦ÙŠ Ù…Ù† Capital.com
-    stop_distance = Ø§Ù„Ù…Ø³Ø§ÙØ© Ø¨Ø§Ù„Ù†Ù‚Ø§Ø· (points) Ø¨ÙŠÙ† Ø§Ù„Ø³Ø¹Ø± Ø§Ù„Ø­Ø§Ù„ÙŠ ÙˆØ§Ù„Ù€ stop
-    """
     r = _put(f'/api/v1/positions/{deal_id}', {
         'trailingStop': True,
         'stopDistance': stop_distance
     })
     if r and r.status_code == 200:
-        log(f'  âœ… Native Trailing Stop enabled | distance: {stop_distance}')
+        log(f'  ✅ Native Trailing Stop enabled | distance: {stop_distance}')
         return True
-    log(f'  âš ï¸ Trailing Stop failed: {r.status_code if r else "no response"}')
+    log(f'  ⚠️ Trailing Stop failed: {r.status_code if r else "no response"}')
     return False
 
 def close_full_api(deal_id):
@@ -564,32 +556,24 @@ def close_full_api(deal_id):
     return r and r.status_code == 200
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# âœ… Ø§Ù„Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¬Ø²Ø¦ÙŠ - Ø§Ù„Ø­Ù„ Ø§Ù„ØµØ­ÙŠØ­
-#
-# Capital.com API Ù„Ø§ ØªØ¯Ø¹Ù… partial close Ù…Ø¨Ø§Ø´Ø±Ø©.
-# Ø§Ù„Ø­Ù„: ÙØªØ­ ØµÙÙ‚Ø© Hedge Ø¹ÙƒØ³ÙŠØ© Ø¨Ù†ÙØ³ Ø§Ù„Ø­Ø¬Ù… Ø§Ù„Ù…Ø±Ø§Ø¯ Ø¥ØºÙ„Ø§Ù‚Ù‡.
-# ÙŠØªØ·Ù„Ø¨: ØªÙØ¹ÙŠÙ„ Hedging Mode Ø¹Ø¨Ø± PUT /accounts/preferences
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
+# ✅ الإغلاق الجزئي - الحل الصحيح
+# Capital.com API لا تدعم partial close مباشرة.
+# الحل: فتح صفقة Hedge عكسية بنفس الحجم المراد إغلاقه.
+# يتطلب: تفعيل Hedging Mode عبر PUT /accounts/preferences
+# ═══════════════════════════════════════════════════════
 
 def enable_hedging_mode():
-    """ØªÙØ¹ÙŠÙ„ ÙˆØ¶Ø¹ Hedging ÙÙŠ Ø§Ù„Ø­Ø³Ø§Ø¨ (Ù…Ø·Ù„ÙˆØ¨ Ù„Ù„Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¬Ø²Ø¦ÙŠ)"""
     r = _put('/api/v1/accounts/preferences', {'hedgingMode': True})
     if r and r.status_code == 200:
-        log('  âœ… Hedging mode enabled')
+        log('  ✅ Hedging mode enabled')
         return True
-    log(f'  âš ï¸ Hedging mode failed: {r.status_code if r else "no response"}')
+    log(f'  ⚠️ Hedging mode failed: {r.status_code if r else "no response"}')
     return False
 
 def close_partial_hedge(pos, partial_size):
-    """
-    Ø§Ù„Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¬Ø²Ø¦ÙŠ Ø¹Ø¨Ø± ÙØªØ­ ØµÙÙ‚Ø© Hedge Ø¹ÙƒØ³ÙŠØ©.
-    - Ø¥Ø°Ø§ Ø§Ù„ØµÙÙ‚Ø© Ø§Ù„Ø£ØµÙ„ÙŠØ© BUY  â†’ Ù†ÙØªØ­ SELL Ø¨Ù†ÙØ³ Ø§Ù„Ø­Ø¬Ù…
-    - Ø¥Ø°Ø§ Ø§Ù„ØµÙÙ‚Ø© Ø§Ù„Ø£ØµÙ„ÙŠØ© SELL â†’ Ù†ÙØªØ­ BUY  Ø¨Ù†ÙØ³ Ø§Ù„Ø­Ø¬Ù…
-    Ø§Ù„Ù†ØªÙŠØ¬Ø©: ØªÙÙ„ØºÙŠ Ø§Ù„ØµÙÙ‚ØªØ§Ù† Ø¨Ø¹Ø¶Ù‡Ù…Ø§ Ø¨Ø´ÙƒÙ„ Ø¬Ø²Ø¦ÙŠ
-    """
     if not USE_HEDGE_PARTIAL_CLOSE:
-        log(f'  â­ Partial close skipped (hedging disabled)')
+        log(f'  ⏭ Partial close skipped (hedging disabled)')
         return False, None
 
     epic      = PAIRS.get(pos['pair'], {}).get('epic', pos['pair'])
@@ -603,7 +587,7 @@ def close_partial_hedge(pos, partial_size):
         'trailingStop':   False,
     }
 
-    log(f'  ðŸ’° Partial Hedge: {direction} {partial_size} {pos["pair"]}')
+    log(f'  💰 Partial Hedge: {direction} {partial_size} {pos["pair"]}')
     r = _post('/api/v1/positions', body)
     if not r:
         return False, None
@@ -617,13 +601,12 @@ def close_partial_hedge(pos, partial_size):
             status  = c.get('dealStatus', 'UNKNOWN')
             deal_id = c.get('dealId', ref)
             if status in ('ACCEPTED', 'SUCCESS'):
-                log(f'  âœ… Partial hedge opened: {deal_id}')
+                log(f'  ✅ Partial hedge opened: {deal_id}')
                 return True, deal_id
         return False, None
 
-    # Ø¥Ø°Ø§ ÙØ´Ù„ Hedge (Ø±Ø¨Ù…Ø§ hedging ØºÙŠØ± Ù…ÙØ¹Ù‘Ù„) â†’ Ù†Ø¹ÙŠØ¯ Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø© Ø¨Ø¹Ø¯ ØªÙØ¹ÙŠÙ„Ù‡
     if r.status_code in (400, 403):
-        log(f'  ðŸ”„ Hedging not enabled, attempting to enable...')
+        log(f'  🔄 Hedging not enabled, attempting to enable...')
         if enable_hedging_mode():
             time.sleep(1)
             r2 = _post('/api/v1/positions', body)
@@ -636,30 +619,24 @@ def close_partial_hedge(pos, partial_size):
                     status  = c.get('dealStatus', 'UNKNOWN')
                     deal_id = c.get('dealId', ref)
                     if status in ('ACCEPTED', 'SUCCESS'):
-                        log(f'  âœ… Partial hedge opened after enable: {deal_id}')
+                        log(f'  ✅ Partial hedge opened after enable: {deal_id}')
                         return True, deal_id
 
-    log(f'  âŒ Partial close failed: {r.status_code} | {r.text[:200]}')
+    log(f'  ❌ Partial close failed: {r.status_code} | {r.text[:200]}')
     return False, None
 
 def close_partial_and_close_hedge(pos, partial_size):
-    """
-    ÙŠØºÙ„Ù‚ Ø§Ù„Ù€ Hedge Ø§Ù„Ù…ÙØªÙˆØ­ Ù…Ø³Ø¨Ù‚Ø§Ù‹ (Ø¥Ù† ÙˆØ¬Ø¯) Ø«Ù… ÙŠÙØªØ­ hedge Ø¬Ø¯ÙŠØ¯
-    """
-    # Ø£ØºÙ„Ù‚ Ø£ÙŠ hedge Ø³Ø§Ø¨Ù‚ Ù…ÙØªÙˆØ­
     old_hedge = pos.get('hedge_deal_id')
     if old_hedge:
         close_full_api(old_hedge)
         op_update(pos['deal_id'], hedge_deal_id=None)
-
     return close_partial_hedge(pos, partial_size)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# âœ… ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ù€ Leverage Ø¯ÙŠÙ†Ø§Ù…ÙŠÙƒÙŠØ§Ù‹ Ø­Ø³Ø¨ Ø§Ù„Ø¬Ù„Ø³Ø©
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
+# ✅ تعديل الـ Leverage ديناميكياً حسب الجلسة
+# ═══════════════════════════════════════════════════════
 
-# Ø®Ø±ÙŠØ·Ø©: instrument_type â†’ Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø±Ø§ÙØ¹Ø§Øª Ø§Ù„Ù…ØªØ§Ø­Ø© (Ù…Ù† API)
 LEVERAGE_MAP = {
     'CURRENCIES':      [1, 10, 20, 30],
     'INDICES':         [1, 10, 20],
@@ -684,19 +661,11 @@ def get_account_preferences():
     return {}
 
 def set_leverage_for_session(session_mult):
-    """
-    ÙŠØ¶Ø¨Ø· Ø§Ù„Ø±Ø§ÙØ¹Ø© Ø§Ù„Ù…Ø§Ù„ÙŠØ© Ø¨Ù†Ø§Ø¡Ù‹ Ø¹Ù„Ù‰ Ø§Ù„Ø¬Ù„Ø³Ø©:
-    - Ø¬Ù„Ø³Ø© Ù„Ù†Ø¯Ù†-Ù†ÙŠÙˆÙŠÙˆØ±Ùƒ (1.5x) â†’ Ø£Ø¹Ù„Ù‰ Ø±Ø§ÙØ¹Ø© Ù…ØªØ§Ø­Ø©
-    - Ø¬Ù„Ø³Ø© Ø¢Ø³ÙŠØ§ (0.5x) â†’ Ø£Ø¯Ù†Ù‰ Ø±Ø§ÙØ¹Ø©
-    - Ø¨Ø§Ù‚ÙŠ Ø§Ù„Ø¬Ù„Ø³Ø§Øª â†’ Ø±Ø§ÙØ¹Ø© ÙˆØ³Ø·Ù‰
-    """
     prefs = get_account_preferences()
     if not prefs:
         return
-
     leverages = prefs.get('leverages', {})
     updated   = {}
-
     for instr_type, available in LEVERAGE_MAP.items():
         current = leverages.get(instr_type, available[0])
         if session_mult >= 1.5:
@@ -706,22 +675,20 @@ def set_leverage_for_session(session_mult):
         else:
             mid_idx = len(available) // 2
             target  = available[mid_idx]
-
         if target != current:
             updated[instr_type] = target
-
     if updated:
         new_leverages = {**leverages, **updated}
         r = _put('/api/v1/accounts/preferences', {'leverages': new_leverages})
         if r and r.status_code == 200:
-            log(f'  âœ… Leverage updated for session {session_mult}x: {updated}')
+            log(f'  ✅ Leverage updated for session {session_mult}x: {updated}')
         else:
-            log(f'  âš ï¸ Leverage update failed: {r.status_code if r else "no response"}')
+            log(f'  ⚠️ Leverage update failed: {r.status_code if r else "no response"}')
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # TELEGRAM
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def tg(text):
     if not TG_TOKEN:
@@ -733,7 +700,7 @@ def tg(text):
         pass
 
 def tg_signal(sig, session_info):
-    icon = 'ðŸŸ¢' if sig['direction'] == 'BUY' else 'ðŸ”´'
+    icon = '🟢' if sig['direction'] == 'BUY' else '🔴'
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
     nl   = '\n'
     tg(f'{icon} *{sig["pair"]} {sig["direction"]}* [{mode}]{nl}'
@@ -744,9 +711,9 @@ def tg_signal(sig, session_info):
        f'_{utc_now()}_')
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # INDICATORS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def fetch_candles(epic, resolution, count=500):
     cache_key = f'{epic}_{resolution}'
@@ -836,9 +803,9 @@ def check_correlation_filter(new_pair, new_direction):
     return True, 'OK'
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # SMART EXITS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def calculate_sl_at_r(pos, locked_r):
     entry   = pos['entry']
@@ -879,7 +846,6 @@ def manage_smart_exits():
     for pos in tracked:
         deal_id = pos['deal_id']
 
-        # ØªØ¬Ø§Ù‡Ù„ ØµÙÙ‚Ø§Øª Ø§Ù„Ù€ Hedge (Ù…ÙØ¹Ø±ÙŽÙ‘ÙØ© Ø¨Ù€ hedge_deal_id ÙÙŠ Ø§Ù„Ù€ parent)
         is_hedge = any(p.get('hedge_deal_id') == deal_id for p in tracked if p['deal_id'] != deal_id)
         if is_hedge:
             continue
@@ -887,11 +853,9 @@ def manage_smart_exits():
         if deal_id not in live_ids:
             exit_price = get_closed_deal_price(deal_id, get_current_price(pos['pair']))
             if exit_price > 0:
-                # Ø£ØºÙ„Ù‚ Ø£ÙŠ hedge Ù…ÙØªÙˆØ­ Ù…Ø¹ Ø§Ù„ØµÙÙ‚Ø©
                 hedge_id = pos.get('hedge_deal_id')
                 if hedge_id and hedge_id in live_ids:
                     close_full_api(hedge_id)
-
                 result, _ = csv_log_trade(pos, exit_price, pos['stage1_done'],
                                           pos['stage2_done'], pos['stage3_done'],
                                           pos['final_locked_r'], 'STOP_OUT')
@@ -928,21 +892,15 @@ def manage_smart_exits():
 
         _, _, _, cs, min_sz, _ = get_instrument_meta(pos['pair'])
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-        # STAGE 1: Ø¹Ù†Ø¯ 1.5R â†’ Hedge 50%
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         if not s1 and profit_r >= STAGE1_TP_R:
             partial_size = round(size * STAGE1_PCT, 2)
             if partial_size >= min_sz:
                 ok, hedge_id = close_partial_and_close_hedge(pos, partial_size)
                 if ok:
                     op_update(deal_id, stage1_done=1, hedge_deal_id=hedge_id)
-                    log(f'  ðŸ“Š Stage1 done | Hedge: {hedge_id}')
-                    tg(f'ðŸ“Š *{pos["pair"]} Stage1* | Hedge 50% @ `{cur_price}` | R: `{profit_r:.1f}`')
+                    log(f'  📊 Stage1 done | Hedge: {hedge_id}')
+                    tg(f'📊 *{pos["pair"]} Stage1* | Hedge 50% @ `{cur_price}` | R: `{profit_r:.1f}`')
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-        # STAGE 2: Ø¹Ù†Ø¯ 2.5R â†’ Hedge 30% + SL â†’ +0.5R
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         elif s1 and not s2 and profit_r >= STAGE2_TP_R:
             remaining   = size * (1 - STAGE1_PCT)
             stage2_size = round(remaining * (STAGE2_PCT / (1 - STAGE1_PCT)), 2)
@@ -952,11 +910,8 @@ def manage_smart_exits():
                     new_sl = calculate_sl_at_r(pos, 0.5)
                     if new_sl and update_sl_api(deal_id, new_sl, tp):
                         op_update(deal_id, stage2_done=1, final_locked_r=0.5, sl=new_sl, hedge_deal_id=hedge_id)
-                        log(f'  ðŸ“Š Stage2 done | SL â†’ +0.5R | Hedge: {hedge_id}')
+                        log(f'  📊 Stage2 done | SL → +0.5R | Hedge: {hedge_id}')
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-        # STAGE 3: Ø¹Ù†Ø¯ 3.5R â†’ Hedge Ù†Ù‡Ø§Ø¦ÙŠ + SL â†’ +2R
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         elif s2 and not s3 and profit_r >= FINAL_TP_R:
             remaining  = size * (1 - STAGE1_PCT) * (1 - STAGE2_PCT / (1 - STAGE1_PCT))
             final_size = round(remaining * FINAL_PCT, 2)
@@ -966,11 +921,8 @@ def manage_smart_exits():
                     new_sl = calculate_sl_at_r(pos, 2.0)
                     if new_sl and update_sl_api(deal_id, new_sl, tp):
                         op_update(deal_id, stage3_done=1, final_locked_r=2.0, sl=new_sl, hedge_deal_id=hedge_id)
-                        log(f'  ðŸ“Š Stage3 done | SL â†’ +2R')
+                        log(f'  📊 Stage3 done | SL → +2R')
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-        # Progressive Lock Ø¨Ø¹Ø¯ Stage 2
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         elif s2:
             new_locked_r = get_progressive_lock(profit_r)
             if new_locked_r > pos['final_locked_r']:
@@ -978,29 +930,24 @@ def manage_smart_exits():
                 if new_sl and should_move_sl(pos['sl'], new_sl, dir_) and update_sl_api(deal_id, new_sl, tp):
                     op_update(deal_id, final_locked_r=new_locked_r, sl=new_sl)
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-        # âœ… Trailing Stop: Ø¥Ù…Ø§ Native API Ø£Ùˆ ÙŠØ¯ÙˆÙŠ
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         elif (s3 or profit_r >= TRAILING_START_R) and profit_r > pos.get('last_trail_r', 0) + 0.5:
             df = fetch_candles(PAIRS[pos['pair']]['epic'], STRATEGY_TF, 50)
             if not df.empty:
                 atr = float(calc_atr_series(df.iloc[:-1], ATR_PERIOD).iloc[-1])
                 if atr > 0:
                     if USE_NATIVE_TRAILING_STOP:
-                        # âœ… ØªÙØ¹ÙŠÙ„ Trailing Stop Ø§Ù„Ø£ØµÙ„ÙŠ Ù…Ù† Capital.com
                         stop_distance = round(atr * TRAILING_ATR_MULT, 5)
                         if enable_native_trailing_stop(deal_id, stop_distance):
                             op_update(deal_id, last_trail_r=profit_r)
                     else:
-                        # ØªØ­Ø±ÙŠÙƒ SL ÙŠØ¯ÙˆÙŠØ§Ù‹
                         trail_sl = calculate_trailing_sl(pos, cur_price, atr)
                         if should_move_sl(pos['sl'], trail_sl, dir_) and update_sl_api(deal_id, trail_sl, tp):
                             op_update(deal_id, sl=trail_sl, last_trail_r=profit_r)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# SIGNAL DETECTION â€” SUPERTREND + EMA 20
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
+# SIGNAL DETECTION — SUPERTREND + EMA 20
+# ═══════════════════════════════════════════════════════
 
 def check_signal(pair_name, config, session_mult, risk_mult):
     epic       = config['epic']
@@ -1045,11 +992,11 @@ def check_signal(pair_name, config, session_mult, risk_mult):
 
     if allow_buy and st_dir_val == 1 and lc > ema_20_val:
         signal, entry = 'BUY', ask
-        log(f'  {pair_name}: ðŸŸ¢ BUY | STâ†‘ | EMA{EMA_PERIOD}: {ema_20_val:.5f}')
+        log(f'  {pair_name}: 🟢 BUY | ST↑ | EMA{EMA_PERIOD}: {ema_20_val:.5f}')
 
     if not signal and allow_sell and st_dir_val == -1 and lc < ema_20_val:
         signal, entry = 'SELL', bid
-        log(f'  {pair_name}: ðŸ”´ SELL | STâ†“ | EMA{EMA_PERIOD}: {ema_20_val:.5f}')
+        log(f'  {pair_name}: 🔴 SELL | ST↓ | EMA{EMA_PERIOD}: {ema_20_val:.5f}')
 
     if not signal:
         return None
@@ -1087,9 +1034,9 @@ def check_signal(pair_name, config, session_mult, risk_mult):
     }
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # EXECUTE & SCAN
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def execute_order(sig):
     body = {
@@ -1101,13 +1048,12 @@ def execute_order(sig):
         'stopLevel':      sig['sl'],
         'profitLevel':    sig['tp']
     }
-    # Ø¥Ø°Ø§ trailing stop Ù…ÙØ¹Ù‘Ù„ØŒ Ù†Ø¶Ø¹ stopDistance Ø¨Ø¯Ù„Ø§Ù‹ Ù…Ù† stopLevel
     if USE_NATIVE_TRAILING_STOP:
         atr_dist = round(sig['atr'] * SL_ATR_MULT, 5)
         body.pop('stopLevel', None)
         body['stopDistance'] = TRAILING_STOP_DISTANCE if TRAILING_STOP_DISTANCE > 0 else atr_dist
 
-    log(f'  ðŸ“¤ {sig["pair"]} | {sig["direction"]} @ {sig["entry"]} | Risk: {sig["risk_percent"]:.2%}')
+    log(f'  📤 {sig["pair"]} | {sig["direction"]} @ {sig["entry"]} | Risk: {sig["risk_percent"]:.2%}')
     r = _post('/api/v1/positions', body)
     if not r:
         return 'ERROR', 'no response'
@@ -1145,14 +1091,13 @@ def run_scan():
     now = datetime.now(timezone.utc)
     can_trade, reason, session_mult, session_name, day_pnl = should_trade()
     if not can_trade:
-        log(f'â¸ {reason}')
+        log(f'⏸ {reason}')
         return
-    log('â”€' * 50)
-    log(f'ðŸ” SCAN | {session_name} | Risk: {session_mult:.1f}x')
-    log('â”€' * 50)
+    log('─' * 50)
+    log(f'🔍 SCAN | {session_name} | Risk: {session_mult:.1f}x')
+    log('─' * 50)
     get_current_balance()
 
-    # âœ… Ø¶Ø¨Ø· Ø§Ù„Ø±Ø§ÙØ¹Ø© Ø¨Ù†Ø§Ø¡Ù‹ Ø¹Ù„Ù‰ Ø§Ù„Ø¬Ù„Ø³Ø©
     set_leverage_for_session(session_mult)
 
     manage_smart_exits()
@@ -1174,7 +1119,7 @@ def run_scan():
             continue
 
         if config['epic'] in open_epics or pair_name in open_pairs_db:
-            log(f'  {pair_name}: â­ Ù…ÙØªÙˆØ­ Ø¨Ø§Ù„ÙØ¹Ù„ØŒ ØªØ¬Ø§ÙˆØ²')
+            log(f'  {pair_name}: ⏭ مفتوح بالفعل، تجاوز')
             continue
 
         key = f'{pair_name}_{ts_key}'
@@ -1197,9 +1142,9 @@ def run_scan():
         time.sleep(2)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # MAIN LOOP
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def main_loop():
     trailing_stops_available = False
@@ -1212,46 +1157,43 @@ def main_loop():
                 if not ok:
                     time.sleep(60)
                     continue
-                session_created       = True
+                session_created          = True
                 trailing_stops_available = trailing_avail
-                _last_ping_time_ref = [time.time()]
             else:
-                # âœ… Ø¥ØµÙ„Ø§Ø­: ping ÙƒÙ„ 8 Ø¯Ù‚Ø§Ø¦Ù‚ Ø¨Ø¯Ù„Ø§Ù‹ Ù…Ù† Ø§Ù†ØªØ¸Ø§Ø± SESSION_AGE
                 ping_session()
 
             run_scan()
             time.sleep(SCAN_INTERVAL)
 
         except KeyboardInterrupt:
-            log('ðŸ›‘ Bot stopped')
+            log('🛑 Bot stopped')
             break
         except Exception as ex:
             log(f'ERROR: {ex}')
-            # Ø¥Ø¹Ø§Ø¯Ø© Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„Ù€ session Ø¹Ù†Ø¯ Ø£ÙŠ Ø®Ø·Ø£
             session_created = False
             time.sleep(30)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 # ENTRY POINT
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═══════════════════════════════════════════════════════
 
 def start_bot():
     db_init()
     csv_init()
     mode = 'DEMO' if DEMO_MODE else 'LIVE'
     print('=' * 60, flush=True)
-    print(f'  ðŸš€ Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD} Bot v2', flush=True)
+    print(f'  🚀 Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD} Bot v2', flush=True)
     print(f'  Timeframe: M15 | Mode: {mode}', flush=True)
     print(f'  SL: {SL_ATR_MULT}x ATR | TP: {TP_ATR_MULT}x ATR', flush=True)
-    print(f'  âœ… Partial Close: Hedge Method | Trailing: {"Native API" if USE_NATIVE_TRAILING_STOP else "Manual"}', flush=True)
-    print(f'  âœ… Dynamic Leverage | Session Ping every {SESSION_PING_INTERVAL}s', flush=True)
+    print(f'  ✅ Partial Close: Hedge Method | Trailing: {"Native API" if USE_NATIVE_TRAILING_STOP else "Manual"}', flush=True)
+    print(f'  ✅ Dynamic Leverage | Session Ping every {SESSION_PING_INTERVAL}s', flush=True)
     print('=' * 60, flush=True)
-    nl = chr(10)
-    tg(f'ðŸš€ *ST+EMA{EMA_PERIOD} Bot v2* [{mode}]{nl}'
+    nl = '\n'
+    tg(f'🚀 *ST+EMA{EMA_PERIOD} Bot v2* [{mode}]{nl}'
        f'Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULT}|{ATR_METHOD}) + EMA{EMA_PERIOD}{nl}'
        f'M15 | SL:{SL_ATR_MULT}xATR | TP:{TP_ATR_MULT}xATR{nl}'
-       f'âœ… Partial Close: Hedge | Dynamic Leverage{nl}'
+       f'✅ Partial Close: Hedge | Dynamic Leverage{nl}'
        f'_{utc_now()}_')
     main_loop()
 
