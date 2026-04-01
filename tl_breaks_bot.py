@@ -445,36 +445,39 @@ def calculate_pnl_since(since_iso):
             return sum(r[0] for r in rows if r[0])
 
 def calculate_unrealized_pnl():
-    """Calculate unrealized P&L from open positions"""
-    open_pos = get_open_positions()
+    """Calculate unrealized P&L from open positions (using DB records)."""
+    open_pos = op_get_all()  # ✅ استخدم DB بدل get_open_positions() من API
     total_unrealized = 0.0
-    
+
     for p in open_pos:
-        cur_price = get_current_price(p['pair'])
-        if cur_price <= 0:
+        pair      = p.get('pair', '')
+        entry     = p.get('entry', 0)
+        size      = p.get('size', 0)
+        direction = p.get('direction', '')
+        atr       = p.get('atr', 0)
+
+        if not pair or entry == 0:
             continue
-        
-        entry = p['entry']
-        size = p['size']
-        direction = p['direction']
-        atr = p['atr']
-        
-        # Calculate P&L in points
+
+        cur_price = get_current_price(pair)
+        if cur_price == 0:
+            continue
+
+        # احسب الربح/الخسارة بالنقاط
         profit_pts = (cur_price - entry) if direction == 'BUY' else (entry - cur_price)
-        
-        # Convert to USD
-        pair_cfg = PAIR_INFO.get(p['pair'])
+
+        # حوّل إلى USD
+        pair_cfg = PAIR_INFO.get(pair)
         if pair_cfg:
             point_val = pair_cfg['point_value']
-            pip_val = pair_cfg['pip_value_per_lot']
-            
-            # Convert points to pips
-            profit_pips = profit_pts / point_val
-            
-            # Convert pips to USD
-            profit_usd = profit_pips * pip_val * size
-            total_unrealized += profit_usd
-    
+            pip_val   = pair_cfg['pip_value_per_lot']
+            profit_pips = profit_pts / point_val  # نقاط → بيبس
+            profit_usd  = profit_pips * pip_val * size
+        else:
+            profit_usd = 0.0
+
+        total_unrealized += profit_usd
+
     return total_unrealized
 
 def check_drawdown_limits():
