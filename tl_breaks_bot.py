@@ -170,7 +170,7 @@ MAX_RISK_PERCENT    = 0.03
 MIN_RISK_PERCENT    = 0.005
 MAX_DAILY_RISK      = 0.05
 MAX_WEEKLY_RISK     = 0.10
-DAILY_PROFIT_TARGET = 0.10
+DAILY_PROFIT_TARGET = 10000
 
 # ═══════════════════════════════════════════════════════
 # SESSION CONFIGURATION
