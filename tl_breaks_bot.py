@@ -31,11 +31,11 @@ load_dotenv()
 # CONFIGURATION & SECURITY
 # ═══════════════════════════════════════════════════════════════════════════
 
-API_KEY = os.getenv('CAPITAL_API_KEY', '')
-EMAIL = os.getenv('CAPITAL_EMAIL', '')
-PASSWORD = os.getenv('CAPITAL_PASSWORD', '')
-TG_TOKEN = os.getenv('TG_TOKEN', '')
-TG_CHAT_ID = os.getenv('TG_CHAT_ID', '')
+API_KEY    = os.getenv('CAPITAL_API_KEY',  'BbmFhEF3FffkcR0Y')
+EMAIL      = os.getenv('CAPITAL_EMAIL',    'almorese2013@gmail.com')
+PASSWORD   = os.getenv('CAPITAL_PASSWORD', 'Ba050326>')
+TG_TOKEN   = os.getenv('TG_TOKEN',         '8782238258:AAEtuQg7OYAmoemhWfLqKdYpqIxfWwyKRSQ')
+TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
 
 if not all([API_KEY, EMAIL, PASSWORD]):
     raise ValueError(
