@@ -126,7 +126,7 @@ PAIR_INFO = {
 
 STRATEGY_TF = 'MINUTE_15'
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '30'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
 # ✅ Session ping with thread safety
 SESSION_PING_INTERVAL = 480  # 8 minutes
@@ -168,7 +168,7 @@ MAX_RISK_PERCENT = 0.03
 MIN_RISK_PERCENT = 0.005
 MAX_DAILY_RISK = 0.05
 MAX_WEEKLY_RISK = 0.10
-DAILY_PROFIT_TARGET = 20000
+DAILY_PROFIT_TARGET = 0.10
 
 # ═══════════════════════════════════════════════════════
 # SESSION CONFIGURATION
@@ -1875,11 +1875,10 @@ def run_scan():
     open_pos = get_open_positions()
     log(f'  Open: {len(open_pos)}/{MAX_OPEN_TRADES}')
     
-    # Check correlation limits
+    # Check correlation limits (but continue scanning for signals)
     max_ok, max_msg = check_max_open_with_correlation()
     if not max_ok:
-        log(f'  ⏭ {max_msg}')
-        return
+        log(f'  ⚠️ {max_msg} - Continuing to scan for signals')
     
     # Generate unique key per candle
     candle_minute = (now.minute // 15) * 15
@@ -1888,11 +1887,13 @@ def run_scan():
     open_epics = {p.get('market', {}).get('epic', '') for p in open_pos}
     open_pairs_db = {p['pair'] for p in op_get_all()}
     
-    # Scan all pairs
+    # Track signals in this scan
+    signals_found = 0
+    signals_executed = 0
+    signals_queued = 0
+    
+    # Scan all pairs - CONTINUE EVEN IF AT MAX OPEN TRADES
     for pair_name, config in PAIRS.items():
-        if len(open_pos) >= MAX_OPEN_TRADES:
-            break
-        
         # Skip if already open
         if config['epic'] in open_epics or pair_name in open_pairs_db:
             continue
@@ -1919,6 +1920,10 @@ def run_scan():
         if not sig:
             continue
         
+        # ✅ SIGNAL FOUND!
+        signals_found += 1
+        log(f'  🎯 {pair_name}: Signal detected | {sig["direction"]}')
+        
         # Save to DB
         db_save(key, pair_name, sig['direction'], sig['entry'], sig['sl'], sig['tp'],
                 sig['atr'], sig['size'], sig['spread'], sig['risk_percent'], session_name)
@@ -1934,16 +1939,28 @@ def run_scan():
                f'Session: `{session_name}`\n'
                f'_{utc_now_readable()}_')
         
-        # Execute order
-        status, ref = execute_order(sig)
-        db_update(key, status)
-        log(f'  {pair_name}: {status} | {ref}')
-        
-        # Refresh open positions
-        open_pos = get_open_positions()
-        open_epics = {p.get('market', {}).get('epic', '') for p in open_pos}
-        
-        time.sleep(2)
+        # Decide: execute now or queue for later
+        if len(open_pos) < MAX_OPEN_TRADES and max_ok:
+            # Execute immediately - we have room
+            status, ref = execute_order(sig)
+            db_update(key, status)
+            log(f'  ✅ {pair_name}: {status} | {ref}')
+            signals_executed += 1
+            
+            # Refresh open positions
+            open_pos = get_open_positions()
+            open_epics = {p.get('market', {}).get('epic', '') for p in open_pos}
+            
+            time.sleep(2)
+        else:
+            # Queue for later - no room or correlation limit hit
+            db_update(key, 'QUEUED')
+            log(f'  📋 {pair_name}: QUEUED (awaiting execution slot)')
+            signals_queued += 1
+    
+    # Final summary
+    if signals_found > 0:
+        log(f'  📊 Scan Complete: {signals_found} signals | {signals_executed} executed | {signals_queued} queued')
 
 
 # ═══════════════════════════════════════════════════════
