@@ -35,13 +35,11 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════
 # SECURITY: NO HARDCODED CREDENTIALS - FIXED ✅
 # ═══════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════
-API_KEY    = os.getenv('CAPITAL_API_KEY',  'BbmFhEF3FffkcR0Y')
-EMAIL      = os.getenv('CAPITAL_EMAIL',    'almorese2013@gmail.com')
-PASSWORD   = os.getenv('CAPITAL_PASSWORD', 'Ba050326>')
-TG_TOKEN   = os.getenv('TG_TOKEN',         '8782238258:AAEtuQg7OYAmoemhWfLqKdYpqIxfWwyKRSQ')
-TG_CHAT_ID = os.getenv('TG_CHAT_ID',       '533243705')
-
+API_KEY    = os.getenv('CAPITAL_API_KEY')
+EMAIL      = os.getenv('CAPITAL_EMAIL')
+PASSWORD   = os.getenv('CAPITAL_PASSWORD')
+TG_TOKEN   = os.getenv('TG_TOKEN')
+TG_CHAT_ID = os.getenv('TG_CHAT_ID')
 
 # ✅ FIXED: No fallback values, fail-fast on missing credentials
 if not API_KEY:
@@ -101,6 +99,13 @@ PAIR_INFO = {
         'contract_size': 1.0,
         'min_spread_absolute': 0.00015,
         'max_spread_absolute': 0.0007,
+    },
+    'USDCAD': {
+        'point_value': 0.0001,         # 1 pip
+        'pip_value_per_lot': 10.0,
+        'contract_size': 1.0,
+        'min_spread_absolute': 0.0002,
+        'max_spread_absolute': 0.0008,
     },
     'US100': {
         'point_value': 1,
