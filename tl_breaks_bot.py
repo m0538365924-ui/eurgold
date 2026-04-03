@@ -426,7 +426,23 @@ def validate_db_sync():
         db_deal_ids = {p['deal_id'] for p in db_positions}
         
         api_positions = get_open_positions()
-        api_deal_ids = {p.get('position', {}).get('dealId', '') for p in api_positions if p.get('position')}
+        
+        # Debug: Log API structure for first position
+        if api_positions:
+            first_pos = api_positions[0]
+            log(f'  📋 API position structure: {json.dumps(first_pos, indent=2)[:500]}...')
+        
+        # Extract deal IDs from API - handle both flat and nested structures
+        api_deal_ids = set()
+        for p in api_positions:
+            # Try nested structure: p['position']['dealId']
+            deal_id_nested = p.get('position', {}).get('dealId', '')
+            # Try flat structure: p['dealId']
+            deal_id_flat = p.get('dealId', '')
+            
+            deal_id = deal_id_nested or deal_id_flat
+            if deal_id:
+                api_deal_ids.add(deal_id)
         
         # Check for orphaned DB records
         orphaned = db_deal_ids - api_deal_ids
@@ -435,21 +451,135 @@ def validate_db_sync():
         if orphaned:
             issues.append(f'Orphaned DB records: {orphaned}')
             for deal_id in orphaned:
-                log(f'⚠️ ORPHANED: {deal_id} in DB but not in API')
-                # Mark for cleanup next cycle
+                log(f'  ℹ️ ORPHANED: {deal_id} in DB but not in API')
         
         # Check for missing DB records (opened via other client)
         missing = api_deal_ids - db_deal_ids
         if missing:
             issues.append(f'Missing DB records: {missing}')
-            log(f'⚠️ WARNING: API has open positions not tracked in DB: {missing}')
+            log(f'  ⚠️ WARNING: API has {len(missing)} open position(s) not tracked in DB')
+            for deal_id in missing:
+                log(f'     → {deal_id}')
         
         is_synced = len(issues) == 0
         return is_synced, issues
     
     except Exception as ex:
-        log(f'❌ DB validation error: {ex}')
-        return False, [str(ex)]
+        log(f'❌ DB validation error: {type(ex).__name__}: {ex}')
+        import traceback
+        log(f'  Traceback: {traceback.format_exc()[:300]}')
+        return False, [f'Validation error: {ex}']
+
+
+def recover_missing_positions():
+    """
+    ✅ NEW: Recover positions opened externally (from other client/session)
+    Imports them into DB so bot can manage them
+    """
+    try:
+        db_positions = op_get_all()
+        db_deal_ids = {p['deal_id'] for p in db_positions}
+        
+        api_positions = get_open_positions()
+        log(f'  📊 Processing {len(api_positions)} position record(s) from API')
+        
+        recovered = []
+        skipped = []
+        
+        for idx, api_pos in enumerate(api_positions):
+            try:
+                # Extract deal_id first (most important)
+                pos_data = api_pos.get('position', api_pos)
+                deal_id = pos_data.get('dealId', pos_data.get('deal_id', ''))
+                
+                if not deal_id:
+                    skipped.append(f'pos_{idx}: no dealId')
+                    continue
+                
+                if deal_id in db_deal_ids:
+                    continue  # Already in DB
+                
+                # Extract pair name - try multiple locations
+                market_data = api_pos.get('market', {})
+                pair = (market_data.get('instrumentName', '') or 
+                       market_data.get('epic', '') or 
+                       pos_data.get('instrumentName', '') or 
+                       pos_data.get('epic', ''))
+                
+                if not pair:
+                    skipped.append(f'{deal_id}: no pair name')
+                    log(f'  ⚠️ {deal_id}: Cannot extract pair name')
+                    continue
+                
+                # Extract direction
+                direction_str = str(pos_data.get('direction', '')).upper()
+                direction = 'BUY' if 'BUY' in direction_str else 'SELL'
+                
+                # Extract price levels
+                entry = float(pos_data.get('level', pos_data.get('price', 0)) or 0)
+                sl = float(pos_data.get('stopLevel', pos_data.get('stop_level', 0)) or 0)
+                tp = float(pos_data.get('profitLevel', pos_data.get('profit_level', 0)) or 0)
+                size = float(pos_data.get('dealSize', pos_data.get('size', 0)) or 0)
+                
+                # Validate minimum requirements
+                if not entry or not size:
+                    skipped.append(f'{deal_id}: entry={entry}, size={size}')
+                    log(f'  ⚠️ {deal_id}: Invalid price/size (entry={entry}, size={size})')
+                    continue
+                
+                # Validate pair exists in configuration
+                if pair not in PAIR_INFO and pair not in PAIRS:
+                    skipped.append(f'{deal_id}: pair_not_configured ({pair})')
+                    log(f'  ⚠️ {deal_id}: Pair {pair} not in configuration')
+                    continue
+                
+                # Calculate ATR estimate for SL management
+                if sl > 0:
+                    atr = abs(entry - sl) / 1.5
+                else:
+                    # Fallback: use 1% of entry price
+                    atr = entry * 0.01
+                
+                # Create unique DB key for tracking
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                rand_suffix = random.randint(1000, 9999)
+                db_key = f'{pair}_RECOVERED_{deal_id[:8]}_{timestamp}_{rand_suffix}'
+                
+                # Save recovered position to DB
+                op_save(deal_id, pair, direction, entry, sl, tp, atr, size, db_key)
+                
+                log(f'  ✅ {deal_id}: {pair} {direction} @ {entry} (size={size})')
+                recovered.append(deal_id)
+            
+            except ValueError as ex:
+                deal_id = api_pos.get('position', api_pos).get('dealId', f'pos_{idx}')
+                log(f'  ❌ {deal_id}: ValueError: {ex}')
+                skipped.append(f'{deal_id}: {type(ex).__name__}')
+            
+            except Exception as ex:
+                deal_id = api_pos.get('position', api_pos).get('dealId', f'pos_{idx}')
+                log(f'  ❌ {deal_id}: {type(ex).__name__}: {ex}')
+                skipped.append(f'{deal_id}: {type(ex).__name__}')
+        
+        # Summary
+        log(f'  📈 Recovery summary: {len(recovered)} recovered, {len(skipped)} skipped')
+        if recovered:
+            log(f'  ✅ Successfully recovered: {", ".join(recovered)}')
+            if TG_TOKEN and TG_CHAT_ID:
+                tg(f'🔄 *DB Recovery*\nRecovered {len(recovered)} position(s)\n'
+                   f'_{utc_now_readable()}_')
+        else:
+            log(f'  ⚠️ No positions were recovered')
+            if skipped:
+                log(f'  Skipped: {skipped[:3]}...')
+        
+        return len(recovered)
+    
+    except Exception as ex:
+        log(f'❌ Position recovery exception: {type(ex).__name__}: {ex}')
+        import traceback
+        log(f'  Traceback (first 300 chars): {traceback.format_exc()[:300]}')
+        return 0
 
 
 # ═══════════════════════════════════════════════════════
@@ -1673,10 +1803,22 @@ def run_scan():
     
     get_current_balance()
     
-    # ✅ NEW: Quick DB sync check
+    # ✅ NEW: Quick DB sync check with recovery
+    log(f'  🔄 Checking database sync...')
     is_synced, issues = validate_db_sync()
     if not is_synced:
-        log(f'⚠️ DB sync issues: {issues}')
+        log(f'  ⚠️ DB sync issues detected: {len(issues)} issue(s)')
+        for issue in issues:
+            log(f'     - {issue}')
+        # Attempt recovery of missing positions
+        log(f'  🔧 Attempting to recover missing positions...')
+        recovered = recover_missing_positions()
+        if recovered > 0:
+            log(f'  ✅ Auto-recovery successful: {recovered} position(s) restored to DB')
+        else:
+            log(f'  ⚠️ Auto-recovery: no positions were recovered')
+    else:
+        log(f'  ✅ Database is in sync')
     
     manage_smart_exits()
     
