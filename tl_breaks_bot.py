@@ -471,6 +471,46 @@ def validate_db_sync():
         return False, [f'Validation error: {ex}']
 
 
+def normalize_pair_name(api_pair_name):
+    """
+    ✅ NEW: Normalize pair names from API to standard format
+    Handles multiple formats: 'EUR/USD', 'EURUSD', 'EUR USD', 'Gold', 'GOLD', etc.
+    Returns standardized pair name (EURUSD, GBPUSD, GOLD, etc.)
+    """
+    if not api_pair_name:
+        return None
+    
+    # Convert to uppercase and remove common separators
+    normalized = str(api_pair_name).upper().replace('/', '').replace(' ', '')
+    
+    # Direct mapping for known pairs
+    pair_aliases = {
+        'EURUSD': ['EURUSD', 'EUR', 'EURX'],
+        'GBPUSD': ['GBPUSD', 'GBP', 'GBPX'],
+        'GOLD': ['GOLD', 'XAU', 'XAUUSD'],
+        'USDCAD': ['USDCAD', 'CAD', 'USDX'],
+        'US100': ['US100', 'USTEC', 'NQ'],
+        'US500': ['US500', 'SPX', 'SPY'],
+        'BTCUSD': ['BTCUSD', 'BTC', 'BITCOIN'],
+    }
+    
+    # Try exact match first
+    if normalized in pair_aliases:
+        return normalized
+    
+    # Try to find by alias
+    for standard_name, aliases in pair_aliases.items():
+        if normalized in aliases:
+            return standard_name
+        # Also check partial matches
+        for alias in aliases:
+            if normalized.startswith(alias[:3]):
+                return standard_name
+    
+    log(f'  ⚠️ Unknown pair format: {api_pair_name} -> {normalized}')
+    return None
+
+
 def recover_missing_positions():
     """
     ✅ NEW: Recover positions opened externally (from other client/session)
@@ -511,6 +551,16 @@ def recover_missing_positions():
                     log(f'  ⚠️ {deal_id}: Cannot extract pair name')
                     continue
                 
+                # ✅ NORMALIZE pair name (handles EUR/USD -> EURUSD, Gold -> GOLD, etc.)
+                pair_normalized = normalize_pair_name(pair)
+                if not pair_normalized:
+                    skipped.append(f'{deal_id}: unknown_pair_format ({pair})')
+                    log(f'  ⚠️ {deal_id}: Cannot normalize pair name: {pair}')
+                    continue
+                
+                pair = pair_normalized  # Use normalized name from here on
+                log(f'  🔄 {deal_id}: Normalized {market_data.get("instrumentName", "")} -> {pair}')
+                
                 # Extract direction
                 direction_str = str(pos_data.get('direction', '')).upper()
                 direction = 'BUY' if 'BUY' in direction_str else 'SELL'
@@ -527,10 +577,10 @@ def recover_missing_positions():
                     log(f'  ⚠️ {deal_id}: Invalid price/size (entry={entry}, size={size})')
                     continue
                 
-                # Validate pair exists in configuration
+                # ✅ Verify normalized pair exists in configuration
                 if pair not in PAIR_INFO and pair not in PAIRS:
-                    skipped.append(f'{deal_id}: pair_not_configured ({pair})')
-                    log(f'  ⚠️ {deal_id}: Pair {pair} not in configuration')
+                    skipped.append(f'{deal_id}: pair_not_in_config ({pair})')
+                    log(f'  ⚠️ {deal_id}: Normalized pair {pair} not in configuration')
                     continue
                 
                 # Calculate ATR estimate for SL management
