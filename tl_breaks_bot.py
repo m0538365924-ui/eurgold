@@ -126,7 +126,7 @@ PAIR_INFO = {
 
 STRATEGY_TF = 'MINUTE_15'
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '30'))
 
 # ✅ Session ping with thread safety
 SESSION_PING_INTERVAL = 480  # 8 minutes
