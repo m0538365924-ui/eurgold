@@ -126,7 +126,7 @@ PAIR_INFO = {
 
 STRATEGY_TF = 'MINUTE_15'
 CANDLES_COUNT = 500
-SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '30'))
+SCAN_INTERVAL = int(os.getenv('SCAN_INTERVAL', '300'))
 
 # ✅ Session ping with thread safety
 SESSION_PING_INTERVAL = 480  # 8 minutes
@@ -168,7 +168,7 @@ MAX_RISK_PERCENT = 0.03
 MIN_RISK_PERCENT = 0.005
 MAX_DAILY_RISK = 0.05
 MAX_WEEKLY_RISK = 0.10
-DAILY_PROFIT_TARGET = 20000
+DAILY_PROFIT_TARGET = 0.10
 
 # ═══════════════════════════════════════════════════════
 # SESSION CONFIGURATION
@@ -1454,24 +1454,30 @@ def manage_smart_exits():
     """
     ✅ FIXED: No hedge, only trailing stops with improved error handling
     ✅ Better race condition handling
+    ✅ TIMEOUT protection to prevent hanging
     """
     tracked = op_get_all()
     if not tracked:
         return
     
+    log(f'  🔄 Managing exits for {len(tracked)} open position(s)...')  # ✅ لوج البداية
+    
     start_time = time.time()
-    max_duration = 30  # seconds
+    max_duration = 15  # ✅ تقليل من 30 إلى 15 ثانية
     
     try:
         live_pos = get_open_positions()
         live_ids = {p.get('position', {}).get('dealId', '') for p in live_pos}
     except Exception as ex:
-        log(f'❌ Failed to get live positions: {ex}')
+        log(f'  ❌ Failed to get live positions: {ex}')
         return
+    
+    exited_count = 0
+    updated_count = 0
     
     for pos in tracked:
         if time.time() - start_time > max_duration:
-            log(f'⚠️ manage_smart_exits timeout')
+            log(f'  ⚠️ manage_smart_exits timeout ({max_duration}s) - exiting early')
             break
         
         deal_id = pos['deal_id']
@@ -1487,8 +1493,9 @@ def manage_smart_exits():
                     if result != 'ERROR':
                         db_update(pos['db_key'], result.upper() if result in ('WIN', 'LOSS', 'BE') else 'CLOSED')
                         op_delete(deal_id)
+                        exited_count += 1
                 else:
-                    log(f'⚠️ Could not fetch exit price for {deal_id}')
+                    log(f'  ⚠️ Could not fetch exit price for {deal_id}')
                 continue
             
             # ✅ FIXED: Better exception handling for price fetching
@@ -1497,7 +1504,7 @@ def manage_smart_exits():
                 if cur_price <= 0:
                     continue
             except Exception as ex:
-                log(f'⚠️ Error getting price for {pos["pair"]}: {ex}')
+                log(f'  ⚠️ Error getting price for {pos["pair"]}: {ex}')
                 continue
             
             entry = pos['entry']
@@ -1526,12 +1533,14 @@ def manage_smart_exits():
                         result, _ = csv_log_trade(pos, cur_price, 'TIME_LOSS')
                         db_update(pos['db_key'], result, 'TIME_LOSS')
                         op_delete(deal_id)
+                        exited_count += 1
                     continue
                 elif profit_r < 0.05:  # Sideways/minimal profit
                     if close_full_api(deal_id):
                         result, _ = csv_log_trade(pos, cur_price, 'TIME_BREAK')
                         db_update(pos['db_key'], result, 'TIME_BREAK')
                         op_delete(deal_id)
+                        exited_count += 1
                     continue
             
             # Trailing stop logic
@@ -1541,6 +1550,7 @@ def manage_smart_exits():
                 if new_sl != pos['sl']:
                     if update_sl_api(deal_id, new_sl, tp):
                         op_update(deal_id, sl=new_sl)
+                        updated_count += 1
             
             elif profit_r >= TRAILING_START_R:
                 # At 2R+, use trailing
@@ -1549,10 +1559,14 @@ def manage_smart_exits():
                 if should_move_sl(pos['sl'], trail_sl, dir_):
                     if update_sl_api(deal_id, trail_sl, tp):
                         op_update(deal_id, sl=trail_sl)
+                        updated_count += 1
         
         except Exception as ex:
-            log(f'❌ Error managing exit for {deal_id}: {type(ex).__name__}: {ex}')
+            log(f'  ❌ Error managing exit for {deal_id}: {type(ex).__name__}: {ex}')
             continue
+    
+    if exited_count > 0 or updated_count > 0:
+        log(f'  ✅ Exit management: {exited_count} closed, {updated_count} SL updated')
 
 
 # ═══════════════════════════════════════════════════════
@@ -1878,7 +1892,9 @@ def run_scan():
     # Check correlation limits (but continue scanning for signals)
     max_ok, max_msg = check_max_open_with_correlation()
     if not max_ok:
-        log(f'  ⚠️ {max_msg} - Continuing to scan for signals')
+        log(f'  ⚠️ {max_msg}')
+    
+    log(f'  🔎 Scanning for new signals...')  # ✅ إضافة لوج
     
     # Generate unique key per candle
     candle_minute = (now.minute // 15) * 15
@@ -1896,28 +1912,34 @@ def run_scan():
     for pair_name, config in PAIRS.items():
         # Skip if already open
         if config['epic'] in open_epics or pair_name in open_pairs_db:
+            log(f'  ⏭ {pair_name}: Already open')
             continue
         
         # Check consecutive losses
         if db_consec_losses(pair_name) >= MAX_CONSECUTIVE_LOSS:
+            log(f'  ⏭ {pair_name}: Consecutive losses exceeded')
             continue
         
         # Generate trade key
         key = f'{pair_name}_{ts_key}'
         if db_is_dup(key):
+            log(f'  ⏭ {pair_name}: Duplicate key')
             continue
         
         # Get dynamic risk
         risk_pct, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
         
         if risk_pct <= 0:
-            log(f'  {pair_name}: ⏭ {risk_reason}')
+            log(f'  ⏭ {pair_name}: {risk_reason}')
             continue
+        
+        log(f'  🔍 {pair_name}: Checking signal...')  # ✅ لوج ما قبل check_signal
         
         # Check signal
         sig = check_signal(pair_name, config, session_mult, risk_pct / BASE_RISK_PERCENT)
         
         if not sig:
+            log(f'  ✗ {pair_name}: No signal')  # ✅ لوج عدم وجود إشارة
             continue
         
         # ✅ SIGNAL FOUND!
@@ -1955,12 +1977,11 @@ def run_scan():
         else:
             # Queue for later - no room or correlation limit hit
             db_update(key, 'QUEUED')
-            log(f'  📋 {pair_name}: QUEUED (awaiting execution slot)')
+            log(f'  📋 {pair_name}: QUEUED')
             signals_queued += 1
     
     # Final summary
-    if signals_found > 0:
-        log(f'  📊 Scan Complete: {signals_found} signals | {signals_executed} executed | {signals_queued} queued')
+    log(f'  ✅ Scan done: {len(PAIRS)} pairs | {signals_found} signals found | {signals_executed} executed | {signals_queued} queued')
 
 
 # ═══════════════════════════════════════════════════════
