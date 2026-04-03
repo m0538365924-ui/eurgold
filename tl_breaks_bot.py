@@ -1665,10 +1665,89 @@ class BacktestEngine:
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════════════════════════
+def cleanup_orphaned_positions():
+    """حذف السجلات اليتيمة من DB"""
+    try:
+        live_pos = get_open_positions()
+        live_ids = {p.get('position', {}).get('dealId', '') for p in live_pos}
+        tracked = op_get_all()
+        
+        for pos in tracked:
+            deal_id = pos['deal_id']
+            if deal_id not in live_ids:
+                log(f'🧹 Cleaning orphaned: {deal_id}')
+                exit_price = get_closed_deal_price(deal_id, get_current_price(pos['pair']))
+                if exit_price > 0:
+                    csv_log_trade(pos, exit_price, 'ORPHANED_CLEANUP')
+                    db_update(pos['db_key'], 'CLOSED', 'ORPHANED')
+                else:
+                    # ✅ احذف حتى لو لم يجد سعر
+                    db_update(pos['db_key'], 'UNKNOWN', 'ORPHANED_NO_PRICE')
+                op_delete(deal_id)  # دائماً احذف
+    except Exception as ex:
+        log(f'⚠️ cleanup_orphaned: {ex}')
+
+
+def run_scan():
+    """Main trading scan"""
+    now = datetime.now(timezone.utc)
+    
+    can_trade, reason, session_mult, session_name, day_pnl = should_trade()
+    if not can_trade:
+        log(f'{reason}')
+        return
+    
+    log('-' * 60)
+    log(f'📡 SCAN | {session_name} | Day P&L: ${day_pnl:+.2f}')
+    log('-' * 60)
+    
+    get_current_balance()
+    
+    # ✅ الترتيب الصحيح:
+    cleanup_orphaned_positions()   # 1. نظّف اليتامى أولاً
+    manage_smart_exits()           # 2. أدر الصفقات المفتوحة
+    
+    # 3. افحص فرص جديدة
+    open_pos = get_open_positions()
+    log(f'Open: {len(open_pos)}/{MAX_OPEN_TRADES}')
+    
+    if len(open_pos) >= MAX_OPEN_TRADES:
+        return
+    
+    open_epics = {p.get('market', {}).get('epic', '') for p in open_pos}
+    open_pairs_db = {p['pair'] for p in op_get_all()}  # الآن نظيفة بعد cleanup
+    
+    for pair_name, config in PAIRS.items():
+        if len(open_pos) >= MAX_OPEN_TRADES:
+            break
+        
+        if config['epic'] in open_epics or pair_name in open_pairs_db:
+            continue
+        
+        riskpct, risk_reason = calculate_dynamic_risk(pair_name, BASE_RISK_PERCENT)
+        if riskpct == 0:
+            log(f'  ⏭ {pair_name}: {risk_reason}')
+            continue
+        
+        sig = check_signal(pair_name, config, session_mult, riskpct)
+        if not sig:
+            continue
+        
+        key = f'{pair_name}{datetime.now(timezone.utc).strftime("%Y-%m-%d%H%M")}{random.randint(1000,9999)}'
+        if db_is_dup(key):
+            continue
+        
+        db_save(key, sig['pair'], sig['direction'], sig['entry'], sig['sl'],
+                sig['tp'], sig['atr'], sig['size'], sig['spread'],
+                sig['risk_percent'], session_name)
+        
+        status, ref = execute_order(sig)
+        db_update(key, status)
+        log(f'  {pair_name} {status} | ref: {ref}')
+
 
 def main_loop():
     """Main loop"""
-    
     session_created = False
     
     while True:
@@ -1695,7 +1774,6 @@ def main_loop():
             traceback.print_exc()
             session_created = False
             time.sleep(30)
-
 # ═══════════════════════════════════════════════════════════════════════════
 # STARTUP
 # ═══════════════════════════════════════════════════════════════════════════
