@@ -183,7 +183,7 @@ PROGRESSIVE_LOCK = {2.0: 0.5, 2.5: 1.0, 3.0: 1.5, 3.5: 2.0, 4.5: 3.0, 6.0: 4.0}
 
 MAX_OPEN_TRADES      = int(os.getenv('MAX_OPEN_TRADES', '6'))
 MAX_CONSECUTIVE_LOSS = int(os.getenv('MAX_CONSEC_LOSS', '3'))
-ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '1000'))
+ACCOUNT_BALANCE      = float(os.getenv('ACCOUNT_BALANCE', '62'))
 
 _BASE_DIR  = os.getenv('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
 DB_FILE    = os.path.join(_BASE_DIR, 'multi_bot.db')
